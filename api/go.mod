@@ -11,3 +11,10 @@ require (
 	github.com/redis/go-redis/v9 v9.5.1
 	golang.org/x/crypto v0.17.0
 )
+
+require (
+	github.com/alicebob/miniredis/v2 v2.33.0
+	github.com/stretchr/testify v1.9.0
+	github.com/testcontainers/testcontainers-go v0.32.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.32.0
+)
