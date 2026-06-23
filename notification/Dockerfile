@@ -1,9 +1,9 @@
 FROM golang:1.23-alpine AS builder
 WORKDIR /app
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
-RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -o notification ./cmd/notification
+RUN CGO_ENABLED=0 GOOS=linux go build -o notification ./notification/cmd/notification
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata

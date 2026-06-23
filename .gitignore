@@ -1,7 +1,7 @@
 # Binaries
-api/api
-scheduler/scheduler
-notification/notification
+api
+scheduler
+notification
 
 # Go build cache
 **/vendor/
@@ -31,3 +31,5 @@ redis_data/
 *.out
 coverage.html
 coverage.out
+
+mock_api.py

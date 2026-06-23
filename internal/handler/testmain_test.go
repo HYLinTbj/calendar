@@ -1,40 +1,83 @@
-package main
+//go:build integration
+
+package handler_test
 
 import (
 	"context"
-	"log"
 	"os"
+	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/hylin/calendar/internal/db"
 	"github.com/hylin/calendar/internal/handler"
 	"github.com/hylin/calendar/internal/middleware"
 	"github.com/hylin/calendar/internal/queue"
 	"github.com/hylin/calendar/internal/repository"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"github.com/testcontainers/testcontainers-go"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func main() {
+var (
+	testPool   *pgxpool.Pool
+	testRDB    *redis.Client
+	testRouter *gin.Engine
+)
+
+func TestMain(m *testing.M) {
+	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
 
-	pool, err := db.NewPool(ctx)
+	pgContainer, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("calendar"),
+		tcpostgres.WithUsername("calendar"),
+		tcpostgres.WithPassword("calendar"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
 	if err != nil {
-		log.Fatalf("connect to db: %v", err)
-	}
-	defer pool.Close()
-
-	if err := db.Migrate(ctx, pool); err != nil {
-		log.Fatalf("migrate: %v", err)
+		panic("start postgres container: " + err.Error())
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr: getEnv("REDIS_ADDR", "localhost:6379"),
-	})
-	defer rdb.Close()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("connect to redis: %v", err)
+	connStr, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		panic("get connection string: " + err.Error())
 	}
 
+	testPool, err = pgxpool.New(ctx, connStr)
+	if err != nil {
+		panic("connect to test db: " + err.Error())
+	}
+
+	if err := db.Migrate(ctx, testPool); err != nil {
+		panic("migrate test db: " + err.Error())
+	}
+
+	mr, err := miniredis.Run()
+	if err != nil {
+		panic("start miniredis: " + err.Error())
+	}
+	testRDB = redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	testRouter = buildRouter(testPool, testRDB)
+
+	code := m.Run()
+
+	testPool.Close()
+	testRDB.Close()
+	mr.Close()
+	_ = pgContainer.Terminate(ctx)
+	os.Exit(code)
+}
+
+func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 	userRepo := repository.NewUserRepository(pool)
 	calRepo := repository.NewCalendarRepository(pool)
 	eventRepo := repository.NewEventRepository(pool)
@@ -42,7 +85,6 @@ func main() {
 	inviteRepo := repository.NewInvitationRepository(pool)
 	categoryRepo := repository.NewCategoryRepository(pool)
 	shareRepo := repository.NewCalendarShareRepository(pool)
-	taskRepo := repository.NewTaskRepository(pool)
 	reminderQueue := queue.NewReminderQueue(rdb)
 
 	authHandler := handler.NewAuthHandler(userRepo, calRepo)
@@ -53,16 +95,12 @@ func main() {
 	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo)
 	inviteHandler := handler.NewInvitationHandler(inviteRepo)
 	categoryHandler := handler.NewCategoryHandler(categoryRepo)
-	taskHandler := handler.NewTaskHandler(taskRepo)
+	taskHandler := handler.NewTaskHandler(repository.NewTaskRepository(pool))
 	icsHandler := handler.NewICSHandler(calRepo, eventRepo, recurringRepo, inviteRepo)
 	freeBusyHandler := handler.NewFreeBusyHandler(eventRepo, userRepo)
 
-	r := gin.Default()
-	r.Use(middleware.CORS())
-
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
-	})
+	r := gin.New()
+	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 
 	auth := r.Group("/auth")
 	{
@@ -136,21 +174,9 @@ func main() {
 		}
 	}
 
-	// Token-authenticated — no session required, the token is the credential.
 	r.GET("/invitations/:token/accept", inviteHandler.Accept)
 	r.GET("/invitations/:token/decline", inviteHandler.Decline)
 	r.GET("/invitations/:token/tentative", inviteHandler.Tentative)
 
-	port := getEnv("PORT", "8080")
-	log.Printf("api listening on :%s", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+	return r
 }
