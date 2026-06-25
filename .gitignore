@@ -31,3 +31,9 @@ redis_data/
 *.out
 coverage.html
 coverage.out
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
