@@ -71,19 +71,30 @@ document.getElementById('trip-form')?.addEventListener('submit', submitTrip);
 // Travel time summary
 // ---------------------------------------------------------------------------
 
-// Label the total travel row as generic "Travel time" so it stays accurate
-// regardless of the selected transport mode (driving, walking, cycling, …).
-// Previously the label was hard-coded to "Driving time".
+// Render the trip summary with real travel time and (when present) buffer
+// shown as separate line items.
+//
+// HYL-92: HYL-72 inflated the travel matrix before the solve, so the old
+// single "Travel time" figure conflated real transit with reserved buffer
+// padding.  The solver now returns total_travel_min (real transit only) and,
+// when a buffer is configured, total_buffer_min (the padding).  Both are
+// surfaced here so the user can see each number independently.
 function renderTripSummary(result) {
   const container = document.getElementById('trip-summary');
   if (!container) return;
 
-  const totalTravel = result.total_travel_min ?? 0;
+  const travelMin = result.total_travel_min ?? 0;
+  const bufferMin = result.total_buffer_min;   // undefined when no buffer set
+
+  const bufferRow = bufferMin != null && bufferMin > 0
+    ? `<dt>Reserved buffer</dt><dd>${bufferMin} min</dd>`
+    : '';
 
   container.innerHTML = `
     <dl class="summary">
       <dt>Travel time</dt>
-      <dd>${totalTravel} min</dd>
+      <dd>${travelMin} min</dd>
+      ${bufferRow}
     </dl>
   `;
 }

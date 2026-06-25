@@ -5,6 +5,9 @@ from __future__ import annotations
 _GENERIC_INFEASIBLE = "Couldn't fit all locked stops within the available time windows"
 _PIN_INFEASIBLE = "Pinned arrival time is outside the day or opening hours of that stop"
 
+# Type alias: a square matrix of travel minutes indexed by stop id.
+TravelMatrix = list[list[float]]
+
 
 def _pin_covered_by_any_day(pin_min: int, day_windows_min: list[tuple[int, int]]) -> bool:
     return any(start <= pin_min <= end for start, end in day_windows_min)
@@ -79,13 +82,60 @@ def _fmt(minutes: int) -> str:
     return f"{minutes // 60:02d}:{minutes % 60:02d}"
 
 
+def _route_travel(route: list[int], matrix: TravelMatrix) -> float:
+    """Sum travel minutes along a route using the given matrix."""
+    return sum(matrix[route[k]][route[k + 1]] for k in range(len(route) - 1))
+
+
+def _compute_travel_stats(
+    routes: list[list[int]],
+    matrix_raw: TravelMatrix | None,
+    matrix_inflated: TravelMatrix | None,
+) -> tuple[list[dict], int, int]:
+    """Return per-day travel/buffer dicts and trip totals.
+
+    HYL-92: HYL-72 inflated the travel matrix before the solve so that both the
+    OR-Tools objective and the reported ``travel_min`` included the buffer.
+    We now compute travel from *both* matrices so each can be reported honestly:
+    ``travel_min`` = real transit, ``buffer_min`` = reserved padding.
+
+    If only one matrix is available (no buffer configured) ``buffer_min`` is 0.
+    """
+    day_stats: list[dict] = []
+    total_travel = 0
+    total_buffer = 0
+
+    for route in routes:
+        if not route or len(route) < 2:
+            day_stats.append({"travel_min": 0, "buffer_min": 0})
+            continue
+
+        raw = int(round(_route_travel(route, matrix_raw))) if matrix_raw else 0
+        inflated = int(round(_route_travel(route, matrix_inflated))) if matrix_inflated else raw
+        buffer = inflated - raw
+
+        day_stats.append({"travel_min": raw, "buffer_min": buffer})
+        total_travel += raw
+        total_buffer += buffer
+
+    return day_stats, total_travel, total_buffer
+
+
 def plan_trip(
     *,
     num_days: int,
     day_windows_min: list[tuple[int, int]],
     locks: list[dict] | None = None,
+    travel_matrix_raw: TravelMatrix | None = None,
+    travel_matrix_inflated: TravelMatrix | None = None,
 ) -> dict:
     """Solve the trip and return a result dict with ``feasible`` and ``reason``.
+
+    ``travel_matrix_raw`` is the unpadded matrix; ``travel_matrix_inflated`` is
+    the matrix after HYL-72's buffer is applied.  When both are supplied the
+    response includes separate ``travel_min`` (real transit) and ``buffer_min``
+    (reserved padding) fields at the day and trip level.  If only one matrix is
+    provided ``buffer_min`` is omitted (treated as zero).
 
     Raises nothing — all error conditions are returned as ``feasible: false``
     with an appropriate ``reason`` so callers can surface them to the user.
@@ -107,12 +157,25 @@ def plan_trip(
     # caused infeasibility, but that is out of scope for this issue.
     # -------------------------------------------------------------------------
 
+    # The solver is always given the inflated matrix so its objective and Time
+    # dimension remain consistent with HYL-72 behaviour.
+    matrix_for_solve = travel_matrix_inflated or travel_matrix_raw
+
     try:
-        routes = _run_ortools(num_days, day_windows_min, locks)
+        routes = _run_ortools(num_days, day_windows_min, locks, matrix_for_solve)
     except _InfeasibleError as exc:
         return {"feasible": False, "reason": str(exc) or _GENERIC_INFEASIBLE}
 
-    return {"feasible": True, "routes": routes}
+    day_stats, total_travel, total_buffer = _compute_travel_stats(
+        routes, travel_matrix_raw, travel_matrix_inflated
+    )
+
+    result: dict = {"feasible": True, "routes": routes, "days": day_stats}
+    result["total_travel_min"] = total_travel
+    if travel_matrix_raw and travel_matrix_inflated:
+        result["total_buffer_min"] = total_buffer
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +190,7 @@ def _run_ortools(
     num_days: int,
     day_windows_min: list[tuple[int, int]],
     locks: list[dict],
+    travel_matrix: TravelMatrix | None = None,
 ) -> list:
     # Real implementation uses ortools.constraint_solver.routing_enums_pb2 etc.
     # This stub always returns an empty route list for testing.
