@@ -66,3 +66,24 @@ async function submitTrip(event) {
 }
 
 document.getElementById('trip-form')?.addEventListener('submit', submitTrip);
+
+// ---------------------------------------------------------------------------
+// Travel time summary
+// ---------------------------------------------------------------------------
+
+// Label the total travel row as generic "Travel time" so it stays accurate
+// regardless of the selected transport mode (driving, walking, cycling, …).
+// Previously the label was hard-coded to "Driving time".
+function renderTripSummary(result) {
+  const container = document.getElementById('trip-summary');
+  if (!container) return;
+
+  const totalTravel = result.total_travel_min ?? 0;
+
+  container.innerHTML = `
+    <dl class="summary">
+      <dt>Travel time</dt>
+      <dd>${totalTravel} min</dd>
+    </dl>
+  `;
+}
