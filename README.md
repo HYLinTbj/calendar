@@ -46,7 +46,9 @@ Email is captured by [MailHog](https://github.com/mailhog/mailhog) in developmen
 - **Free/busy** — query availability across multiple users
 - **Invitations** — tokenized email links; attendees respond accept / decline / tentative
 - **RSVP statuses** — per-attendee `accepted` / `declined` / `tentative` / `needs_action` on `GET /events/:id`
-- **Categories** — color-coded event categories
+- **Categories / Areas** — color-coded categories that double as ongoing "Areas" of work, each with an optional weekly time target
+- **Time tracking** — logged time *is* calendar events: tag an event with an area (category) and its span (`end - start`) counts as time spent. `GET /events/stats` rolls minutes up per area and per sub-activity (the event title), against each area's weekly target
+- **Tasks** — lightweight backlog items per area; optional due dates, done / not-done, no deadlines required
 
 ## Quickstart
 
@@ -94,6 +96,7 @@ POST   /calendars/:id/import        # ICS upload
 POST   /events
 GET    /events[?calendar_id=&from=&to=]
 GET    /events/search?q=
+GET    /events/stats[?from=&to=]    # minutes per area + sub-activity (title) breakdown
 GET    /events/:id                  # includes attendee_statuses
 PUT    /events/:id
 DELETE /events/:id
@@ -115,13 +118,30 @@ DELETE /recurring-events/:id
 GET /free-busy?emails=a@x.com,b@x.com&from=<RFC3339>&to=<RFC3339>
 ```
 
-### Categories
+### Categories / Areas
 ```
-POST   /categories
+POST   /categories          # accepts weekly_target_minutes
 GET    /categories
 GET    /categories/:id
 PUT    /categories/:id
 DELETE /categories/:id
+```
+
+### Time Tracking
+
+There is no separate time-log entity — a logged session is just a calendar event
+with a category (area) set. Duration comes from the event's own `start_time` /
+`end_time`, and the sub-activity is the event title (e.g. area "French", title
+"reading"). Roll-ups come from `GET /events/stats` (see [Events](#events)); all-day
+events are excluded. Query `to=<now>` to count only elapsed time, not future plans.
+
+### Tasks
+```
+POST   /tasks
+GET    /tasks[?area_id=&done=]
+GET    /tasks/:id
+PUT    /tasks/:id                      # toggling done sets/clears completed_at
+DELETE /tasks/:id
 ```
 
 ### Invitations (no auth required)

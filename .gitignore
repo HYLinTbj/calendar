@@ -1,7 +1,10 @@
-# Binaries
-api/api
-scheduler/scheduler
-notification/notification
+# Binaries (root-level files only; the !/x/ lines re-include the source dirs)
+/api
+!/api/
+/scheduler
+!/scheduler/
+/notification
+!/notification/
 
 # Go build cache
 **/vendor/
@@ -31,3 +34,6 @@ redis_data/
 *.out
 coverage.html
 coverage.out
+
+# Local-only mock API helper for frontend iteration (see CLAUDE.md) — deliberately untracked
+mock_api.py

@@ -9,19 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hylin/calendar/internal/queue"
 	"github.com/hylin/calendar/notification/internal/mailer"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
-
-type reminderJob struct {
-	EventID   uuid.UUID `json:"event_id"`
-	Minutes   int       `json:"minutes"`
-	Method    string    `json:"method"`
-	Title     string    `json:"title"`
-	StartTime time.Time `json:"start_time"`
-	Attendees []string  `json:"attendees"`
-}
 
 type Worker struct {
 	rdb     *redis.Client
@@ -76,7 +68,7 @@ func (w *Worker) handleReminder(ctx context.Context, member string) {
 		log.Printf("get reminder %s: %v", member, err)
 		return
 	}
-	var job reminderJob
+	var job queue.ReminderJob
 	if err := json.Unmarshal([]byte(data), &job); err != nil {
 		log.Printf("unmarshal reminder %s: %v", member, err)
 		return

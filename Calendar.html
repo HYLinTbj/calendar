@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tempo — Calendar</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    // ─────────────────────────────────────────────
+    // CONSTANTS & SHARED STYLES
+    // ─────────────────────────────────────────────
+    const API_BASE = 'http://localhost:8080';
+
+    const DAYS   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const HOUR_H = 60; // px per hour in time grid
+    const CALENDAR_COLORS = ['#4f46e5','#0891b2','#059669','#d97706','#dc2626','#7c3aed','#db2777','#0284c7'];
+
+    const S = {
+      label:   { display:'block', fontSize:12, fontWeight:500, color:'var(--text-muted)', marginBottom:4, textTransform:'uppercase', letterSpacing:'0.03em' },
+      input:   { display:'block', width:'100%', padding:'8px 10px', border:'1px solid var(--border)', borderRadius:8, fontSize:14, color:'var(--text)', background:'#fff', boxSizing:'border-box' },
+      btnPri:  { padding:'8px 16px', background:'var(--accent)', color:'#fff', border:'none', borderRadius:8, fontSize:14, fontWeight:500, cursor:'pointer', display:'inline-flex', alignItems:'center', gap:6 },
+      btnOut:  { padding:'8px 16px', background:'transparent', color:'var(--text)', border:'1px solid var(--border)', borderRadius:8, fontSize:14, fontWeight:500, cursor:'pointer' },
+      iconBtn: { background:'none', border:'none', cursor:'pointer', padding:'4px 8px', borderRadius:6, fontSize:16, color:'var(--text-muted)', lineHeight:1, display:'inline-flex', alignItems:'center' },
+      overlay: { position:'fixed', inset:0, background:'rgba(0,0,0,0.45)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 },
+      modal:   { background:'#fff', borderRadius:16, padding:28, boxShadow:'0 20px 60px rgba(0,0,0,0.2)', maxHeight:'90vh', overflow:'auto' },
+    };
+
+    // ─────────────────────────────────────────────
+    // DATE UTILITIES
+    // ─────────────────────────────────────────────
+    function localDate(y, m, d) { return new Date(y, m, d); }
+    function ymd(date) {
+      return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+    }
+    function sameDay(a,b) { return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
+    function addDays(d,n) { const r=new Date(d); r.setDate(r.getDate()+n); return r; }
+    function startOfWeek(d) { const r=new Date(d); r.setDate(r.getDate()-r.getDay()); r.setHours(0,0,0,0); return r; }
+    function endOfWeek(d) { const r=startOfWeek(d); r.setDate(r.getDate()+6); r.setHours(23,59,59,999); return r; }
+    function startOfMonth(d) { return new Date(d.getFullYear(), d.getMonth(), 1); }
+    function endOfMonth(d) { return new Date(d.getFullYear(), d.getMonth()+1, 0); }
+    function fmtTime(d) { return new Date(d).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); }
+    function fmtHour(h) { return h===0?'12 AM':h<12?`${h} AM`:h===12?'12 PM':`${h-12} PM`; }
+    function hhmm(date) { return `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`; }
+    function fmtMins(m) { m=Math.round(m||0); const h=Math.floor(m/60), mm=m%60; if(h&&mm) return `${h}h ${mm}m`; if(h) return `${h}h`; return `${mm}m`; }
+    function weekRange(d) { const s=startOfWeek(d); return { from:s, to:addDays(s,7) }; }
+
+    // All-day events use UTC date directly; timed events use local date
+    function evtKey(e) {
+      return e.all_day ? e.start_time.slice(0,10) : ymd(new Date(e.start_time));
+    }
+
+    function getMonthGrid(date) {
+      const first = startOfMonth(date);
+      const last  = endOfMonth(date);
+      const days  = [];
+      for (let i=0; i<first.getDay(); i++) days.push(addDays(first, -(first.getDay()-i)));
+      for (let d=1; d<=last.getDate(); d++) days.push(new Date(date.getFullYear(), date.getMonth(), d));
+      while (days.length < 42) days.push(addDays(days[days.length-1], 1));
+      return days;
+    }
+    function getWeekDays(date) {
+      const s = startOfWeek(date);
+      return Array.from({length:7},(_,i)=>addDays(s,i));
+    }
+
+    // ─────────────────────────────────────────────
+    // API
+    // ─────────────────────────────────────────────
+    const getToken  = () => localStorage.getItem('tempo_token');
+    const setToken  = t => localStorage.setItem('tempo_token', t);
+    const clearToken= () => localStorage.removeItem('tempo_token');
+
+    async function api(path, opts={}) {
+      const tok = getToken();
+      const headers = { 'Content-Type':'application/json', ...opts.headers };
+      if (tok) headers['Authorization'] = `Bearer ${tok}`;
+      const res = await fetch(`${API_BASE}${path}`, {...opts, headers});
+      if (res.status===401) { clearToken(); window.location.reload(); return; }
+      if (res.status===204) return null;
+      const body = await res.json().catch(()=>({}));
+      if (!res.ok) throw new Error(body.error || body.message || `HTTP ${res.status}`);
+      return body;
+    }
+
+    function getEventColor(evt, calendars=[], categories=[]) {
+      if (evt.category_id) {
+        const c = categories.find(x=>x.id===evt.category_id);
+        if (c?.color) return c.color;
+      }
+      const cal = calendars.find(x=>x.id===evt.calendar_id);
+      return cal?.color || 'var(--accent)';
+    }
+
+    // ─────────────────────────────────────────────
+    // AUTH PAGE
+    // ─────────────────────────────────────────────
+    function AuthPage({ onAuth }) {
+      const [mode,setMode]=React.useState('login');
+      const [form,setForm]=React.useState({username:'',email:'',password:''});
+      const [err,setErr]=React.useState('');
+      const [busy,setBusy]=React.useState(false);
+      const set=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
+
+      async function submit(e) {
+        e.preventDefault(); setErr(''); setBusy(true);
+        try {
+          if (mode==='register') {
+            await api('/auth/register',{method:'POST',body:JSON.stringify({username:form.username,email:form.email,password:form.password})});
+          }
+          const data = await api('/auth/login',{method:'POST',body:JSON.stringify({email:form.email,password:form.password})});
+          setToken(data.token); onAuth(data.user);
+        } catch(ex) { setErr(ex.message); } finally { setBusy(false); }
+      }
+
+      return (
+        <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'var(--bg-subtle)'}}>
+          <div style={{background:'#fff',borderRadius:16,padding:'40px 44px',width:380,boxShadow:'0 4px 24px rgba(0,0,0,0.08)'}}>
+            <div style={{textAlign:'center',marginBottom:32}}>
+              <div style={{fontSize:28,fontWeight:700,color:'var(--accent)',letterSpacing:'-0.03em'}}>Tempo</div>
+              <div style={{color:'var(--text-muted)',fontSize:14,marginTop:4}}>
+                {mode==='login'?'Sign in to your calendar':'Create your account'}
+              </div>
+            </div>
+            <form onSubmit={submit}>
+              {mode==='register'&&(
+                <div style={{marginBottom:14}}>
+                  <label style={S.label}>Username</label>
+                  <input style={S.input} value={form.username} onChange={set('username')} placeholder="johndoe" required autoFocus />
+                </div>
+              )}
+              <div style={{marginBottom:14}}>
+                <label style={S.label}>Email</label>
+                <input style={S.input} type="email" value={form.email} onChange={set('email')} placeholder="you@example.com" required autoFocus={mode==='login'} />
+              </div>
+              <div style={{marginBottom:24}}>
+                <label style={S.label}>Password</label>
+                <input style={S.input} type="password" value={form.password} onChange={set('password')} placeholder="••••••••" required />
+              </div>
+              {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:16,padding:'8px 12px',background:'#fef2f2',borderRadius:8}}>{err}</div>}
+              <button type="submit" disabled={busy} style={{...S.btnPri,width:'100%',justifyContent:'center'}}>
+                {busy?'Loading...':(mode==='login'?'Sign In':'Create Account')}
+              </button>
+            </form>
+            <div style={{textAlign:'center',marginTop:20,fontSize:14,color:'var(--text-muted)'}}>
+              {mode==='login'?"Don't have an account? ":"Already have an account? "}
+              <span style={{color:'var(--accent)',cursor:'pointer',fontWeight:500}} onClick={()=>{setMode(m=>m==='login'?'register':'login');setErr('');}}>
+                {mode==='login'?'Register':'Sign in'}
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // MINI CALENDAR (sidebar)
+    // ─────────────────────────────────────────────
+    function MiniCalendar({ date, onSelect, eventDays=new Set() }) {
+      const [month,setMonth]=React.useState(()=>new Date(date.getFullYear(),date.getMonth(),1));
+      const days = getMonthGrid(month);
+      const today= new Date();
+      React.useEffect(()=>{ setMonth(new Date(date.getFullYear(),date.getMonth(),1)); },[date.getFullYear(),date.getMonth()]);
+
+      return (
+        <div style={{padding:'14px 10px 8px'}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:6}}>
+            <button onClick={()=>setMonth(m=>new Date(m.getFullYear(),m.getMonth()-1,1))} style={S.iconBtn}>‹</button>
+            <span style={{fontSize:13,fontWeight:600}}>{MONTHS[month.getMonth()].slice(0,3)} {month.getFullYear()}</span>
+            <button onClick={()=>setMonth(m=>new Date(m.getFullYear(),m.getMonth()+1,1))} style={S.iconBtn}>›</button>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)'}}>
+            {['S','M','T','W','T','F','S'].map((d,i)=>(
+              <div key={i} style={{textAlign:'center',fontSize:10,fontWeight:600,color:'var(--text-muted)',padding:'2px 0'}}>{d}</div>
+            ))}
+            {days.map((day,i)=>{
+              const isToday   = sameDay(day,today);
+              const isSel     = sameDay(day,date);
+              const inMonth   = day.getMonth()===month.getMonth();
+              const hasDot    = eventDays.has(ymd(day));
+              return (
+                <div key={i} onClick={()=>onSelect(day)} style={{
+                  textAlign:'center',padding:'3px 1px',borderRadius:20,cursor:'pointer',fontSize:11,position:'relative',
+                  background: isToday?'var(--accent)': isSel?'var(--accent-light)':'transparent',
+                  color: isToday?'#fff': isSel?'var(--accent)': inMonth?'var(--text)':'var(--text-muted)',
+                  fontWeight: isToday||isSel?600:400, opacity:inMonth?1:0.4,
+                }}>
+                  {day.getDate()}
+                  {hasDot&&!isToday&&<span style={{position:'absolute',bottom:0,left:'50%',transform:'translateX(-50%)',width:3,height:3,borderRadius:'50%',background:'var(--accent)',display:'block'}}/>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // SIDEBAR
+    // ─────────────────────────────────────────────
+    function Sidebar({ currentDate, onDateSelect, calendars, selCals, onToggleCal, categories, eventDays, onNewEvent, onNewCalendar }) {
+      return (
+        <div style={{width:'var(--sidebar-width)',borderRight:'1px solid var(--border)',background:'#fff',display:'flex',flexDirection:'column',flexShrink:0,overflowY:'auto'}}>
+          <div style={{padding:'16px 12px 0'}}>
+            <button onClick={onNewEvent} style={{...S.btnPri,width:'100%',justifyContent:'center'}}>
+              <span style={{fontSize:20,lineHeight:1,marginTop:-1}}>+</span> New Event
+            </button>
+          </div>
+
+          <MiniCalendar date={currentDate} onSelect={onDateSelect} eventDays={eventDays} />
+
+          <div style={{padding:'0 10px',marginTop:2}}>
+            <div style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.05em',padding:'6px 4px 4px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <span>My Calendars</span>
+              <button onClick={onNewCalendar} style={{...S.iconBtn,fontSize:18,padding:'2px 6px'}} title="New calendar">+</button>
+            </div>
+            {calendars.map(cal=>(
+              <div key={cal.id} onClick={()=>onToggleCal(cal.id)}
+                style={{display:'flex',alignItems:'center',gap:8,padding:'5px 4px',cursor:'pointer',borderRadius:6,fontSize:13,userSelect:'none'}}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-subtle)'}
+                onMouseLeave={e=>e.currentTarget.style.background=''}>
+                <span style={{
+                  width:12,height:12,borderRadius:3,flexShrink:0,transition:'0.15s',
+                  background:selCals.has(cal.id)?(cal.color||'var(--accent)'):'transparent',
+                  border:`2px solid ${cal.color||'var(--accent)'}`,
+                  display:'flex',alignItems:'center',justifyContent:'center',
+                }}>
+                  {selCals.has(cal.id)&&<span style={{color:'#fff',fontSize:8,lineHeight:1,fontWeight:700}}>✓</span>}
+                </span>
+                <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{cal.name}</span>
+                {cal.is_default&&<span style={{fontSize:10,color:'var(--text-muted)'}}>default</span>}
+              </div>
+            ))}
+          </div>
+
+          {categories.length>0&&(
+            <div style={{padding:'0 10px',marginTop:8}}>
+              <div style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.05em',padding:'6px 4px 4px'}}>Categories</div>
+              {categories.map(cat=>(
+                <div key={cat.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 4px',fontSize:13}}>
+                  <span style={{width:10,height:10,borderRadius:'50%',background:cat.color||'#999',flexShrink:0}}/>
+                  <span>{cat.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // HEADER
+    // ─────────────────────────────────────────────
+    function Header({ view, onView, currentDate, onNav, onToday, user, onLogout, search, onSearch, workspace, onWorkspace }) {
+      const title = React.useMemo(()=>{
+        if (view==='month') return `${MONTHS[currentDate.getMonth()]} ${currentDate.getFullYear()}`;
+        if (view==='day')   return `${DAYS[currentDate.getDay()]}, ${MONTHS[currentDate.getMonth()].slice(0,3)} ${currentDate.getDate()}, ${currentDate.getFullYear()}`;
+        const s=startOfWeek(currentDate), e=endOfWeek(currentDate);
+        return s.getMonth()===e.getMonth()
+          ? `${MONTHS[s.getMonth()]} ${s.getFullYear()}`
+          : `${MONTHS[s.getMonth()].slice(0,3)} – ${MONTHS[e.getMonth()].slice(0,3)} ${e.getFullYear()}`;
+      },[view,currentDate]);
+
+      return (
+        <div style={{height:'var(--header-height)',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',padding:'0 20px',gap:12,background:'#fff',flexShrink:0}}>
+          <div style={{fontSize:20,fontWeight:700,color:'var(--accent)',letterSpacing:'-0.03em',marginRight:4}}>Tempo</div>
+
+          <WorkspaceNav workspace={workspace} onWorkspace={onWorkspace}/>
+
+          <div style={{display:'flex',alignItems:'center',gap:2}}>
+            <button onClick={onToday} style={{...S.btnOut,padding:'5px 12px',fontSize:13}}>Today</button>
+            <button onClick={()=>onNav(-1)} style={{...S.iconBtn,fontSize:20,padding:'2px 8px'}}>‹</button>
+            <button onClick={()=>onNav(1)}  style={{...S.iconBtn,fontSize:20,padding:'2px 8px'}}>›</button>
+          </div>
+
+          <div style={{fontWeight:600,fontSize:16,flex:1,minWidth:0}}>{title}</div>
+
+          <div style={{position:'relative'}}>
+            <input value={search} onChange={e=>onSearch(e.target.value)}
+              placeholder="Search events…"
+              style={{...S.input,width:200,padding:'6px 10px',fontSize:13,paddingLeft:30}}/>
+            <span style={{position:'absolute',left:9,top:'50%',transform:'translateY(-50%)',color:'var(--text-muted)',fontSize:13,pointerEvents:'none'}}>⌕</span>
+          </div>
+
+          <div style={{display:'flex',background:'var(--bg-subtle)',borderRadius:8,padding:2,gap:1}}>
+            {['month','week','day'].map(v=>(
+              <button key={v} onClick={()=>onView(v)} style={{
+                padding:'5px 11px',borderRadius:6,border:'none',cursor:'pointer',fontSize:13,fontWeight:500,
+                background:view===v?'#fff':'transparent',
+                color:view===v?'var(--text)':'var(--text-muted)',
+                boxShadow:view===v?'0 1px 3px rgba(0,0,0,0.1)':'none',transition:'0.1s',
+              }}>
+                {v.charAt(0).toUpperCase()+v.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:4}}>
+            <div style={{width:32,height:32,borderRadius:'50%',background:'var(--accent)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,fontWeight:700,flexShrink:0}}>
+              {user?.username?.[0]?.toUpperCase()||'?'}
+            </div>
+            <button onClick={onLogout} style={{...S.btnOut,padding:'4px 10px',fontSize:12}}>Logout</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // MONTH VIEW
+    // ─────────────────────────────────────────────
+    function MonthView({ currentDate, events, calendars, categories, onDayClick, onEventClick }) {
+      const days = React.useMemo(()=>getMonthGrid(currentDate),[currentDate]);
+      const today = new Date();
+      const byDay = React.useMemo(()=>{
+        const m={};
+        events.forEach(e=>{ const k=evtKey(e); (m[k]=m[k]||[]).push(e); });
+        Object.values(m).forEach(arr=>arr.sort((a,b)=>new Date(a.start_time)-new Date(b.start_time)));
+        return m;
+      },[events]);
+
+      return (
+        <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',borderBottom:'1px solid var(--border)',flexShrink:0}}>
+            {DAYS.map(d=>(
+              <div key={d} style={{textAlign:'center',padding:'8px 0',fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em'}}>{d}</div>
+            ))}
+          </div>
+          <div style={{flex:1,display:'grid',gridTemplateColumns:'repeat(7,1fr)',gridTemplateRows:'repeat(6,1fr)',overflow:'hidden'}}>
+            {days.map((day,i)=>{
+              const k = ymd(day);
+              const evts = byDay[k]||[];
+              const isToday   = sameDay(day,today);
+              const inMonth   = day.getMonth()===currentDate.getMonth();
+              const MAX=3;
+              return (
+                <div key={i} onClick={()=>onDayClick(day)} style={{
+                  border:'1px solid var(--border)',marginTop:-1,marginLeft:-1,
+                  padding:'4px 6px',cursor:'pointer',overflow:'hidden',
+                  background:inMonth?'#fff':'var(--bg-subtle)',
+                }} onMouseEnter={e=>e.currentTarget.style.background=inMonth?'#f8f9ff':'#f3f4f6'}
+                   onMouseLeave={e=>e.currentTarget.style.background=inMonth?'#fff':'var(--bg-subtle)'}>
+                  <div style={{marginBottom:2}}>
+                    <span style={{
+                      display:'inline-flex',alignItems:'center',justifyContent:'center',
+                      width:24,height:24,borderRadius:'50%',fontSize:12,
+                      background:isToday?'var(--accent)':'transparent',
+                      color:isToday?'#fff':inMonth?'var(--text)':'var(--text-muted)',
+                      fontWeight:isToday?700:400,
+                    }}>{day.getDate()}</span>
+                  </div>
+                  {evts.slice(0,MAX).map(evt=>{
+                    const col=getEventColor(evt,calendars,categories);
+                    return (
+                      <div key={evt.id} onClick={e=>{e.stopPropagation();onEventClick(evt);}} style={{
+                        background:col,color:'#fff',borderRadius:4,padding:'1px 5px',
+                        fontSize:11,fontWeight:500,marginBottom:2,
+                        overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis',cursor:'pointer',
+                      }}>
+                        {!evt.all_day&&<span style={{marginRight:3,opacity:0.85}}>{fmtTime(evt.start_time)}</span>}
+                        {evt.title}
+                      </div>
+                    );
+                  })}
+                  {evts.length>MAX&&<div style={{fontSize:11,color:'var(--text-muted)',fontWeight:500}}>+{evts.length-MAX} more</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // CURRENT TIME LINE
+    // ─────────────────────────────────────────────
+    function NowLine() {
+      const [now,setNow]=React.useState(new Date());
+      React.useEffect(()=>{ const id=setInterval(()=>setNow(new Date()),30000); return ()=>clearInterval(id); },[]);
+      const top=(now.getHours()*60+now.getMinutes())*(HOUR_H/60);
+      return (
+        <div style={{position:'absolute',top,left:0,right:0,height:2,background:'#ef4444',zIndex:2,pointerEvents:'none'}}>
+          <div style={{width:8,height:8,borderRadius:'50%',background:'#ef4444',position:'absolute',left:-3,top:-3}}/>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // TIME GRID (week + day)
+    // ─────────────────────────────────────────────
+    function TimeGrid({ days, events, calendars, categories, onSlotClick, onEventClick }) {
+      const ref=React.useRef(null);
+      React.useEffect(()=>{ if(ref.current) ref.current.scrollTop=7*HOUR_H-30; },[]);
+      const today=new Date();
+      const HOURS=Array.from({length:24},(_,i)=>i);
+
+      const byDay=React.useMemo(()=>{
+        const m={};
+        days.forEach(d=>{m[ymd(d)]=[];});
+        events.forEach(e=>{ const k=evtKey(e); if(m[k]) m[k].push(e); });
+        return m;
+      },[days,events]);
+
+      function evStyle(evt,col) {
+        const s=new Date(evt.start_time), en=new Date(evt.end_time);
+        const top=(s.getHours()*60+s.getMinutes())*(HOUR_H/60);
+        const dur=Math.max((en-s)/60000,30);
+        return { position:'absolute',top,height:Math.max(dur*(HOUR_H/60)-2,20),left:2,right:2,
+                 background:col,borderRadius:5,padding:'2px 6px',overflow:'hidden',cursor:'pointer',
+                 color:'#fff',fontSize:11,fontWeight:500,zIndex:1 };
+      }
+
+      return (
+        <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+          {/* day headers */}
+          <div style={{display:'flex',borderBottom:'1px solid var(--border)',flexShrink:0,paddingLeft:52}}>
+            {days.map((day,i)=>(
+              <div key={i} style={{flex:1,textAlign:'center',padding:'8px 4px'}}>
+                <div style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em'}}>{DAYS[day.getDay()]}</div>
+                <div style={{marginTop:2}}>
+                  <span style={{
+                    display:'inline-flex',alignItems:'center',justifyContent:'center',
+                    width:28,height:28,borderRadius:'50%',fontSize:15,
+                    background:sameDay(day,today)?'var(--accent)':'transparent',
+                    color:sameDay(day,today)?'#fff':'var(--text)',
+                    fontWeight:sameDay(day,today)?700:400,
+                  }}>{day.getDate()}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* scrollable grid */}
+          <div ref={ref} style={{flex:1,overflow:'auto',position:'relative'}}>
+            <div style={{display:'flex',minHeight:HOUR_H*24}}>
+              {/* time labels */}
+              <div style={{width:52,flexShrink:0,position:'relative'}}>
+                {HOURS.map(h=>(
+                  <div key={h} style={{height:HOUR_H,position:'relative'}}>
+                    {h>0&&<span style={{position:'absolute',top:-8,right:8,fontSize:10,color:'var(--text-muted)',fontFamily:'var(--font-mono)',whiteSpace:'nowrap'}}>{fmtHour(h)}</span>}
+                  </div>
+                ))}
+              </div>
+
+              {/* columns */}
+              {days.map((day,di)=>{
+                const k=ymd(day);
+                const dayEvts=byDay[k]||[];
+                return (
+                  <div key={di} style={{flex:1,position:'relative',borderLeft:'1px solid var(--border)'}}>
+                    {HOURS.map(h=>(
+                      <div key={h} style={{position:'absolute',top:h*HOUR_H,left:0,right:0,height:HOUR_H,borderTop:'1px solid var(--border)',cursor:'pointer'}}
+                           onClick={()=>{ const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
+                    ))}
+                    {dayEvts.filter(e=>!e.all_day).map(evt=>{
+                      const col=getEventColor(evt,calendars,categories);
+                      return (
+                        <div key={evt.id} style={evStyle(evt,col)} onClick={e=>{e.stopPropagation();onEventClick(evt);}}>
+                          <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{evt.title}</div>
+                          <div style={{opacity:0.85,fontSize:10}}>{fmtTime(evt.start_time)}</div>
+                        </div>
+                      );
+                    })}
+                    {sameDay(day,today)&&<NowLine/>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // SEARCH DROPDOWN
+    // ─────────────────────────────────────────────
+    function SearchDropdown({ query, calendars, categories, onPick, onClose }) {
+      const [res,setRes]=React.useState([]);
+      const [busy,setBusy]=React.useState(false);
+      React.useEffect(()=>{
+        if(!query.trim()){setRes([]);return;}
+        const t=setTimeout(async()=>{
+          setBusy(true);
+          try{ const d=await api(`/events/search?q=${encodeURIComponent(query)}`); setRes(d||[]); }
+          catch{setRes([]);}
+          finally{setBusy(false);}
+        },280);
+        return()=>clearTimeout(t);
+      },[query]);
+
+      if(!query.trim()) return null;
+      return (
+        <div style={{position:'absolute',top:'calc(100% + 6px)',right:0,width:320,background:'#fff',border:'1px solid var(--border)',borderRadius:10,boxShadow:'0 8px 24px rgba(0,0,0,0.12)',zIndex:300,maxHeight:280,overflow:'auto'}}>
+          {busy&&<div style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:13}}>Searching…</div>}
+          {!busy&&res.length===0&&<div style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:13}}>No results</div>}
+          {res.map(evt=>{
+            const col=getEventColor(evt,calendars,categories);
+            return (
+              <div key={evt.id} onClick={()=>{onPick(evt);onClose();}}
+                style={{padding:'10px 14px',cursor:'pointer',borderBottom:'1px solid var(--border)',display:'flex',gap:10,alignItems:'flex-start'}}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-subtle)'}
+                onMouseLeave={e=>e.currentTarget.style.background=''}>
+                <span style={{width:8,height:8,borderRadius:'50%',background:col,flexShrink:0,marginTop:4}}/>
+                <div>
+                  <div style={{fontSize:13,fontWeight:500}}>{evt.title}</div>
+                  <div style={{fontSize:11,color:'var(--text-muted)',marginTop:1}}>{new Date(evt.start_time).toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // EVENT MODAL (create / edit)
+    // ─────────────────────────────────────────────
+    function EventModal({ event, defaultDate, calendars, categories, onSave, onDelete, onClose }) {
+      const isEdit = !!event?.id;
+      const defStart = React.useMemo(()=>{
+        if(defaultDate){ const d=new Date(defaultDate); d.setSeconds(0,0); return d; }
+        const d=new Date(); d.setMinutes(0,0,0); return d;
+      },[]);
+      const defEnd = React.useMemo(()=>{ const d=new Date(defStart); d.setHours(d.getHours()+1); return d; },[defStart]);
+
+      const [form,setForm]=React.useState(()=>({
+        title:       event?.title||'',
+        description: event?.description||'',
+        location:    event?.location||'',
+        calendar_id: event?.calendar_id||calendars[0]?.id||'',
+        category_id: event?.category_id||'',
+        all_day:     event?.all_day||false,
+        start_date:  event?ymd(new Date(event.start_time)):ymd(defStart),
+        start_time:  event?hhmm(new Date(event.start_time)):hhmm(defStart),
+        end_date:    event?ymd(new Date(event.end_time)):ymd(defEnd),
+        end_time:    event?hhmm(new Date(event.end_time)):hhmm(defEnd),
+      }));
+      const [busy,setBusy]=React.useState(false);
+      const [err,setErr]=React.useState('');
+      const set=k=>e=>setForm(f=>({...f,[k]:e.target.type==='checkbox'?e.target.checked:e.target.value}));
+
+      async function save(e) {
+        e.preventDefault(); if(!form.title.trim()){setErr('Title is required');return;}
+        setBusy(true); setErr('');
+        try {
+          const startISO = form.all_day
+            ? `${form.start_date}T00:00:00Z`
+            : new Date(`${form.start_date}T${form.start_time}:00`).toISOString();
+          const endISO   = form.all_day
+            ? `${form.end_date}T23:59:59Z`
+            : new Date(`${form.end_date}T${form.end_time}:00`).toISOString();
+          const body = {title:form.title.trim(),description:form.description,location:form.location,calendar_id:form.calendar_id,start_time:startISO,end_time:endISO,all_day:form.all_day};
+          // Explicit null clears the category on edit ("None" selected);
+          // omitting the field would keep the current one.
+          body.category_id = form.category_id || null;
+          const saved = isEdit
+            ? await api(`/events/${event.id}`,{method:'PUT', body:JSON.stringify(body)})
+            : await api('/events',              {method:'POST',body:JSON.stringify(body)});
+          onSave(saved);
+        } catch(ex){setErr(ex.message);}
+        finally{setBusy(false);}
+      }
+
+      async function del() {
+        if(!confirm('Delete this event?'))return;
+        setBusy(true);
+        try{ await api(`/events/${event.id}`,{method:'DELETE'}); onDelete(event.id); }
+        catch(ex){setErr(ex.message);setBusy(false);}
+      }
+
+      return (
+        <div style={S.overlay} onClick={onClose}>
+          <div style={{...S.modal,width:480}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+              <h2 style={{margin:0,fontSize:18,fontWeight:700}}>{isEdit?'Edit Event':'New Event'}</h2>
+              <button onClick={onClose} style={{...S.iconBtn,fontSize:22}}>×</button>
+            </div>
+            <form onSubmit={save}>
+              <div style={{marginBottom:14}}>
+                <input style={{...S.input,fontSize:16,fontWeight:500}} value={form.title} onChange={set('title')} placeholder="Event title" autoFocus required/>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
+                <div><label style={S.label}>Date</label><input style={S.input} type="date" value={form.start_date} onChange={set('start_date')}/></div>
+                {!form.all_day&&<div><label style={S.label}>Start time</label><input style={S.input} type="time" value={form.start_time} onChange={set('start_time')}/></div>}
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
+                <div><label style={S.label}>End date</label><input style={S.input} type="date" value={form.end_date} onChange={set('end_date')}/></div>
+                {!form.all_day&&<div><label style={S.label}>End time</label><input style={S.input} type="time" value={form.end_time} onChange={set('end_time')}/></div>}
+              </div>
+              <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer',marginBottom:14}}>
+                <input type="checkbox" checked={form.all_day} onChange={set('all_day')} style={{width:14,height:14,accentColor:'var(--accent)'}}/>
+                All day
+              </label>
+              <div style={{marginBottom:14}}><label style={S.label}>Location</label><input style={S.input} value={form.location} onChange={set('location')} placeholder="Add location…"/></div>
+              <div style={{marginBottom:14}}><label style={S.label}>Description</label><textarea style={{...S.input,height:72,resize:'vertical'}} value={form.description} onChange={set('description')} placeholder="Add description…"/></div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:20}}>
+                <div>
+                  <label style={S.label}>Calendar</label>
+                  <select style={S.input} value={form.calendar_id} onChange={set('calendar_id')}>
+                    {calendars.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+                {categories.length>0&&(
+                  <div>
+                    <label style={S.label}>Category</label>
+                    <select style={S.input} value={form.category_id} onChange={set('category_id')}>
+                      <option value="">None</option>
+                      {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                )}
+              </div>
+              {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14,padding:'8px 10px',background:'#fef2f2',borderRadius:6}}>{err}</div>}
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                {isEdit&&<button type="button" onClick={del} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>Delete</button>}
+                <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
+                <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':'Save'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // NEW CALENDAR MODAL
+    // ─────────────────────────────────────────────
+    function NewCalendarModal({ onSave, onClose }) {
+      const [name,setName]=React.useState('');
+      const [color,setColor]=React.useState(CALENDAR_COLORS[0]);
+      const [busy,setBusy]=React.useState(false);
+      const [err,setErr]=React.useState('');
+
+      async function save(e) {
+        e.preventDefault(); if(!name.trim())return;
+        setBusy(true);
+        try{ const c=await api('/calendars',{method:'POST',body:JSON.stringify({name:name.trim(),color})}); onSave(c); }
+        catch(ex){setErr(ex.message);setBusy(false);}
+      }
+
+      return (
+        <div style={S.overlay} onClick={onClose}>
+          <div style={{...S.modal,width:340}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+              <h2 style={{margin:0,fontSize:18,fontWeight:700}}>New Calendar</h2>
+              <button onClick={onClose} style={{...S.iconBtn,fontSize:22}}>×</button>
+            </div>
+            <form onSubmit={save}>
+              <div style={{marginBottom:16}}><label style={S.label}>Name</label><input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="Calendar name" autoFocus required/></div>
+              <div style={{marginBottom:20}}>
+                <label style={S.label}>Color</label>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
+                  {CALENDAR_COLORS.map(c=>(
+                    <button key={c} type="button" onClick={()=>setColor(c)} style={{width:28,height:28,borderRadius:'50%',background:c,border:color===c?'3px solid #111':'3px solid transparent',cursor:'pointer',outline:'none',transition:'0.1s'}}/>
+                  ))}
+                </div>
+              </div>
+              {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
+                <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Creating…':'Create'}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // MAIN CALENDAR APP
+    // ─────────────────────────────────────────────
+    function CalendarApp({ user, onLogout, nav }) {
+      const [view,setView]   = React.useState('month');
+      const [date,setDate]   = React.useState(new Date());
+      const [calendars,setCals] = React.useState([]);
+      const [cats,setCats]   = React.useState([]);
+      const [events,setEvts] = React.useState([]);
+      const [selCals,setSel] = React.useState(new Set());
+      const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
+      const [newCal,setNewCal]= React.useState(false);
+      const [search,setSearch]= React.useState('');
+      const [showSearch,setShowSearch]=React.useState(false);
+
+      // load catalogs once
+      React.useEffect(()=>{
+        api('/calendars').then(d=>{ const cs=d||[]; setCals(cs); setSel(new Set(cs.map(c=>c.id))); }).catch(()=>{});
+        api('/categories').then(d=>setCats(d||[])).catch(()=>{});
+      },[]);
+
+      // load events for current range + selected calendars
+      React.useEffect(()=>{
+        if(calendars.length===0) return;
+        const ids=[...selCals]; if(ids.length===0){setEvts([]);return;}
+        let from,to;
+        if(view==='month'){
+          const s=startOfWeek(startOfMonth(date));
+          from=s.toISOString(); to=addDays(s,41).toISOString();
+        } else if(view==='week'){
+          from=startOfWeek(date).toISOString(); to=endOfWeek(date).toISOString();
+        } else {
+          const s=new Date(date); s.setHours(0,0,0,0);
+          const e=new Date(date); e.setHours(23,59,59,999);
+          from=s.toISOString(); to=e.toISOString();
+        }
+        Promise.all(ids.map(id=>api(`/events?calendar_id=${id}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`).then(d=>d||[]).catch(()=>[])))
+          .then(r=>{ const seen=new Set(); setEvts(r.flat().filter(e=>{ if(seen.has(e.id)) return false; seen.add(e.id); return true; })); });
+      },[view,date,calendars,selCals]);
+
+      function navigate(dir) {
+        setDate(d=>{ const n=new Date(d);
+          if(view==='month')      n.setMonth(n.getMonth()+dir);
+          else if(view==='week')  n.setDate(n.getDate()+dir*7);
+          else                    n.setDate(n.getDate()+dir);
+          return n; });
+      }
+      function toggleCal(id){ setSel(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; }); }
+      function eventSaved(saved){ setEvts(es=>{ const i=es.findIndex(e=>e.id===saved.id); return i>=0?[...es.slice(0,i),saved,...es.slice(i+1)]:[...es,saved]; }); setModal(null); }
+      function eventDeleted(id){ setEvts(es=>es.filter(e=>e.id!==id)); setModal(null); }
+      function calCreated(c){ setCals(cs=>[...cs,c]); setSel(s=>new Set([...s,c.id])); setNewCal(false); }
+
+      const visible = events.filter(e=>selCals.has(e.calendar_id));
+      const eventDays = React.useMemo(()=>new Set(events.map(evtKey)),[events]);
+
+      return (
+        <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
+          <div style={{position:'relative',flexShrink:0}}>
+            <Header view={view} onView={setView} currentDate={date} onNav={navigate}
+              onToday={()=>setDate(new Date())} user={user} onLogout={onLogout}
+              search={search} onSearch={v=>{ setSearch(v); setShowSearch(!!v); }}
+              workspace={nav.workspace} onWorkspace={nav.setWorkspace}/>
+            {showSearch&&(
+              <div style={{position:'absolute',right:164,top:'100%',zIndex:400}}>
+                <SearchDropdown query={search} calendars={calendars} categories={cats}
+                  onPick={evt=>setModal({event:evt})}
+                  onClose={()=>{ setSearch(''); setShowSearch(false); }}/>
+              </div>
+            )}
+          </div>
+
+          <div style={{flex:1,display:'flex',overflow:'hidden'}}>
+            <Sidebar currentDate={date}
+              onDateSelect={d=>{ setDate(d); setView('day'); }}
+              calendars={calendars} selCals={selCals} onToggleCal={toggleCal}
+              categories={cats} eventDays={eventDays}
+              onNewEvent={()=>setModal({defaultDate:date})}
+              onNewCalendar={()=>setNewCal(true)}/>
+
+            <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+              {view==='month'&&<MonthView currentDate={date} events={visible} calendars={calendars} categories={cats} onDayClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
+              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
+              {view==='day'&&<TimeGrid days={[date]} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
+            </div>
+          </div>
+
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} onSave={eventSaved} onDelete={eventDeleted} onClose={()=>setModal(null)}/>}
+          {newCal&&<NewCalendarModal onSave={calCreated} onClose={()=>setNewCal(false)}/>}
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // WORKSPACE NAV (Calendar / Log / Areas)
+    // ─────────────────────────────────────────────
+    function WorkspaceNav({ workspace, onWorkspace }) {
+      const items=[['calendar','Calendar'],['log','Log'],['areas','Areas']];
+      return (
+        <div style={{display:'flex',background:'var(--bg-subtle)',borderRadius:8,padding:2,gap:1}}>
+          {items.map(([k,label])=>(
+            <button key={k} onClick={()=>onWorkspace(k)} style={{
+              padding:'5px 12px',borderRadius:6,border:'none',cursor:'pointer',fontSize:13,fontWeight:500,
+              background:workspace===k?'#fff':'transparent',
+              color:workspace===k?'var(--text)':'var(--text-muted)',
+              boxShadow:workspace===k?'0 1px 3px rgba(0,0,0,0.1)':'none',transition:'0.1s',
+            }}>{label}</button>
+          ))}
+        </div>
+      );
+    }
+
+    // Shared top bar for the non-calendar workspaces.
+    function TopBar({ title, workspace, onWorkspace, user, onLogout, children }) {
+      return (
+        <div style={{height:'var(--header-height)',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',padding:'0 20px',gap:12,background:'#fff',flexShrink:0}}>
+          <div style={{fontSize:20,fontWeight:700,color:'var(--accent)',letterSpacing:'-0.03em',marginRight:4}}>Tempo</div>
+          <WorkspaceNav workspace={workspace} onWorkspace={onWorkspace}/>
+          <div style={{fontWeight:600,fontSize:16,flex:1,minWidth:0}}>{title}</div>
+          {children}
+          <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:4}}>
+            <div style={{width:32,height:32,borderRadius:'50%',background:'var(--accent)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,fontWeight:700,flexShrink:0}}>
+              {user?.username?.[0]?.toUpperCase()||'?'}
+            </div>
+            <button onClick={onLogout} style={{...S.btnOut,padding:'4px 10px',fontSize:12}}>Logout</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // LOG VIEW — record sessions, see weekly stats
+    // ─────────────────────────────────────────────
+    function StatsPanel({ stats }) {
+      if(!stats) return null;
+      const areas=(stats.areas||[]).slice().sort((a,b)=>b.total_minutes-a.total_minutes);
+      const grand=areas.reduce((s,a)=>s+a.total_minutes,0);
+      return (
+        <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:14}}>
+            <div style={{fontSize:14,fontWeight:600}}>This week</div>
+            <div style={{fontSize:13,color:'var(--text-muted)'}}>{fmtMins(grand)} total</div>
+          </div>
+          {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14}}>Nothing logged this week yet.</div>}
+          {areas.map(a=>{
+            const tgt=a.weekly_target_minutes||0;
+            const pct=tgt>0?Math.min(100,Math.round(a.total_minutes/tgt*100)):(grand>0?Math.round(a.total_minutes/grand*100):0);
+            return (
+              <div key={a.area_id||'none'} style={{marginBottom:12}}>
+                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                  <span style={{width:10,height:10,borderRadius:'50%',background:a.area_color||'#cbd5e1',flexShrink:0}}/>
+                  <span style={{fontSize:13,fontWeight:500,flex:1}}>{a.area_name}</span>
+                  <span style={{fontSize:12,color:'var(--text-muted)',fontFamily:'var(--font-mono)'}}>
+                    {fmtMins(a.total_minutes)}{tgt>0?` / ${fmtMins(tgt)}`:''}
+                  </span>
+                </div>
+                <div style={{height:6,borderRadius:3,background:'var(--bg-subtle)',overflow:'hidden'}}>
+                  <div style={{height:'100%',width:`${pct}%`,background:a.area_color||'var(--accent)',borderRadius:3,transition:'0.2s'}}/>
+                </div>
+                {a.sub_activities&&a.sub_activities.length>0&&(
+                  <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:5}}>
+                    {a.sub_activities.slice().sort((x,y)=>y.minutes-x.minutes).map(s=>(
+                      <span key={s.name} style={{fontSize:11,background:'var(--bg-subtle)',borderRadius:12,padding:'2px 8px',color:'var(--text-muted)'}}>{s.name||'—'} · {fmtMins(s.minutes)}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // A categorized calendar event doubles as a logged session; project it into
+    // the shape the Log view renders (area + sub-activity + duration). Area
+    // name/color are resolved client-side from the categories list, since the
+    // events API returns only category_id.
+    function eventToLog(e, catById) {
+      const c = e.category_id ? catById[e.category_id] : null;
+      const mins = Math.max(0, Math.round((new Date(e.end_time) - new Date(e.start_time)) / 60000));
+      return {
+        id: e.id,
+        area_id: e.category_id || '',
+        area_name: c ? c.name : '',
+        area_color: c ? c.color : '',
+        sub_activity: e.title || '',
+        duration_minutes: mins,
+        notes: e.description || '',
+        logged_at: e.start_time,
+      };
+    }
+
+    function LogView({ user, onLogout, nav }) {
+      const blankForm=()=>({ area_id:'', sub_activity:'', hours:'0', minutes:'30', date:ymd(new Date()), notes:'' });
+      const [areas,setAreas]=React.useState([]);
+      const [logs,setLogs]=React.useState([]);
+      const [stats,setStats]=React.useState(null);
+      const [editing,setEditing]=React.useState(null);
+      const [form,setForm]=React.useState(blankForm);
+      const [err,setErr]=React.useState('');
+      const [busy,setBusy]=React.useState(false);
+
+      async function loadAll() {
+        try {
+          const { from, to } = weekRange(new Date());
+          const now=new Date();
+          const statsTo = to>now?now:to; // count elapsed time this week, not future plans
+          const cats=await api('/categories'); setAreas(cats||[]);
+          const catById={}; (cats||[]).forEach(c=>{ catById[c.id]=c; });
+          // Recent logged sessions = non all-day events over the last 30 days, up to now.
+          const since=addDays(now,-30);
+          const evs=await api(`/events?from=${encodeURIComponent(since.toISOString())}&to=${encodeURIComponent(now.toISOString())}`)||[];
+          setLogs(evs.filter(e=>!e.all_day).map(e=>eventToLog(e,catById)));
+          const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(statsTo.toISOString())}`); setStats(s||null);
+        } catch(ex){ setErr(ex.message); }
+      }
+      React.useEffect(()=>{ loadAll(); },[]);
+
+      const set=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
+
+      async function submit(e) {
+        e.preventDefault(); setErr('');
+        const mins=(parseInt(form.hours||'0',10)*60)+(parseInt(form.minutes||'0',10));
+        if(!(mins>0)){ setErr('Duration must be greater than zero'); return; }
+        setBusy(true);
+        try {
+          // A log entry is a calendar event; title carries the sub-activity.
+          // The Log view only shows sessions with start_time <= now ("elapsed
+          // time"), so anchor today's entries to end at now — placing them at
+          // noon would hide a morning entry until 12:00. Backdated days keep
+          // noon. Clamp to midnight so an early-morning entry can't spill into
+          // the previous day.
+          let start;
+          if(form.date===ymd(new Date())){
+            start=new Date(Date.now()-mins*60000);
+            const dayStart=new Date(`${form.date}T00:00:00`);
+            if(start<dayStart) start=dayStart;
+          } else {
+            start=new Date(`${form.date}T12:00:00`);
+          }
+          const end=new Date(start.getTime()+mins*60000);
+          const areaName=(areas.find(a=>a.id===form.area_id)||{}).name;
+          const body={
+            title: form.sub_activity.trim() || areaName || 'Session',
+            description: form.notes.trim(),
+            start_time: start.toISOString(),
+            end_time: end.toISOString(),
+            category_id: form.area_id||null,
+          };
+          if(editing) await api(`/events/${editing}`,{method:'PUT',body:JSON.stringify(body)});
+          else        await api('/events',{method:'POST',body:JSON.stringify(body)});
+          setForm(blankForm()); setEditing(null);
+          await loadAll();
+        } catch(ex){ setErr(ex.message); }
+        finally{ setBusy(false); }
+      }
+
+      function startEdit(l) {
+        setEditing(l.id);
+        setForm({ area_id:l.area_id||'', sub_activity:l.sub_activity||'',
+          hours:String(Math.floor(l.duration_minutes/60)), minutes:String(l.duration_minutes%60),
+          date:ymd(new Date(l.logged_at)), notes:l.notes||'' });
+      }
+      async function del(id) {
+        if(!confirm('Delete this entry?')) return;
+        try{ await api(`/events/${id}`,{method:'DELETE'}); if(editing===id){setEditing(null);setForm(blankForm());} await loadAll(); }
+        catch(ex){ setErr(ex.message); }
+      }
+
+      const grouped=React.useMemo(()=>{
+        const m={};
+        logs.forEach(l=>{ const k=ymd(new Date(l.logged_at)); (m[k]=m[k]||[]).push(l); });
+        return Object.entries(m).sort((a,b)=>a[0]<b[0]?1:-1);
+      },[logs]);
+
+      return (
+        <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
+          <TopBar title="Time Log" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}/>
+          <div style={{flex:1,overflow:'auto',background:'var(--bg-subtle)'}}>
+            <div style={{maxWidth:860,margin:'0 auto',padding:'24px 20px 60px'}}>
+              <form onSubmit={submit} style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18,marginBottom:24}}>
+                <div style={{fontSize:14,fontWeight:600,marginBottom:14}}>{editing?'Edit entry':'Log time'}</div>
+                <div style={{display:'grid',gridTemplateColumns:'1.3fr 1.3fr 0.7fr 0.7fr 1.1fr',gap:10,alignItems:'end'}}>
+                  <div><label style={S.label}>Area</label>
+                    <select style={S.input} value={form.area_id} onChange={set('area_id')}>
+                      <option value="">No area</option>
+                      {areas.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select></div>
+                  <div><label style={S.label}>Activity</label><input style={S.input} value={form.sub_activity} onChange={set('sub_activity')} placeholder="reading…"/></div>
+                  <div><label style={S.label}>Hours</label><input style={S.input} type="number" min="0" value={form.hours} onChange={set('hours')}/></div>
+                  <div><label style={S.label}>Min</label><input style={S.input} type="number" min="0" max="59" value={form.minutes} onChange={set('minutes')}/></div>
+                  <div><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={set('date')}/></div>
+                </div>
+                <div style={{marginTop:10}}><label style={S.label}>Notes</label><input style={S.input} value={form.notes} onChange={set('notes')} placeholder="optional details…"/></div>
+                {err&&<div style={{color:'#dc2626',fontSize:13,marginTop:10}}>{err}</div>}
+                <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}}>
+                  {editing&&<button type="button" style={S.btnOut} onClick={()=>{setEditing(null);setForm(blankForm());setErr('');}}>Cancel</button>}
+                  <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':(editing?'Update':'Add entry')}</button>
+                </div>
+              </form>
+
+              <StatsPanel stats={stats}/>
+
+              <div style={{marginTop:24}}>
+                <div style={{fontSize:13,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:10}}>Recent entries</div>
+                {grouped.length===0&&<div style={{color:'var(--text-muted)',fontSize:14,padding:'20px 0'}}>No entries yet — log your first session above.</div>}
+                {grouped.map(([day,items])=>{
+                  const total=items.reduce((s,l)=>s+l.duration_minutes,0);
+                  return (
+                    <div key={day} style={{marginBottom:18}}>
+                      <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:6}}>
+                        <div style={{fontSize:13,fontWeight:600}}>{new Date(day+'T12:00:00').toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'})}</div>
+                        <div style={{fontSize:12,color:'var(--text-muted)'}}>{fmtMins(total)}</div>
+                      </div>
+                      <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+                        {items.map((l,idx)=>(
+                          <div key={l.id} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 12px',borderTop:idx?'1px solid var(--border)':'none'}}>
+                            <span style={{width:10,height:10,borderRadius:'50%',background:l.area_color||'#cbd5e1',flexShrink:0}}/>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:13,fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                                {l.area_name||'No area'}{l.sub_activity?<span style={{color:'var(--text-muted)',fontWeight:400}}> · {l.sub_activity}</span>:null}
+                              </div>
+                              {l.notes&&<div style={{fontSize:12,color:'var(--text-muted)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{l.notes}</div>}
+                            </div>
+                            <div style={{fontSize:13,fontFamily:'var(--font-mono)'}}>{fmtMins(l.duration_minutes)}</div>
+                            <button style={S.iconBtn} title="Edit" onClick={()=>startEdit(l)}>✎</button>
+                            <button style={{...S.iconBtn,color:'#dc2626'}} title="Delete" onClick={()=>del(l.id)}>×</button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // AREAS VIEW — goals + tasks per area
+    // ─────────────────────────────────────────────
+    function TaskRow({ task, onToggle, onDel }) {
+      return (
+        <div style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0'}}>
+          <span onClick={()=>onToggle(task)} style={{
+            width:16,height:16,borderRadius:4,border:`2px solid ${task.done?'var(--accent)':'var(--border)'}`,
+            background:task.done?'var(--accent)':'transparent',cursor:'pointer',flexShrink:0,
+            display:'flex',alignItems:'center',justifyContent:'center',
+          }}>{task.done&&<span style={{color:'#fff',fontSize:10,fontWeight:700,lineHeight:1}}>✓</span>}</span>
+          <span style={{flex:1,fontSize:13,color:task.done?'var(--text-muted)':'var(--text)',textDecoration:task.done?'line-through':'none'}}>{task.title}</span>
+          {task.due_date&&<span style={{fontSize:11,color:'var(--text-muted)'}}>{new Date(task.due_date).toLocaleDateString([],{month:'short',day:'numeric'})}</span>}
+          <button onClick={()=>onDel(task.id)} style={{...S.iconBtn,fontSize:14,color:'var(--text-muted)',padding:'0 4px'}} title="Delete">×</button>
+        </div>
+      );
+    }
+
+    function AreaCard({ area, tasks, weekMins, onToggle, onAdd, onDel, onEdit }) {
+      const [newTitle,setNewTitle]=React.useState('');
+      const [showDone,setShowDone]=React.useState(false);
+      const open=tasks.filter(t=>!t.done);
+      const done=tasks.filter(t=>t.done);
+      const tgt=area.weekly_target_minutes||0;
+      const pct=tgt>0?Math.min(100,Math.round(weekMins/tgt*100)):0;
+      return (
+        <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:16,display:'flex',flexDirection:'column'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+            <span style={{width:12,height:12,borderRadius:3,background:area.color||'#cbd5e1',flexShrink:0}}/>
+            <div style={{fontSize:15,fontWeight:600,flex:1}}>{area.name}</div>
+            {onEdit&&<button style={S.iconBtn} title="Edit area" onClick={onEdit}>✎</button>}
+          </div>
+          {tgt>0&&(
+            <div style={{marginBottom:12}}>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'var(--text-muted)',marginBottom:4}}>
+                <span>This week</span><span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(weekMins)} / {fmtMins(tgt)}</span>
+              </div>
+              <div style={{height:6,borderRadius:3,background:'var(--bg-subtle)',overflow:'hidden'}}>
+                <div style={{height:'100%',width:`${pct}%`,background:area.color||'var(--accent)',borderRadius:3,transition:'0.2s'}}/>
+              </div>
+            </div>
+          )}
+          <div style={{display:'flex',flexDirection:'column',gap:2}}>
+            {open.length===0&&<div style={{fontSize:13,color:'var(--text-muted)',padding:'4px 0'}}>No open tasks.</div>}
+            {open.map(t=><TaskRow key={t.id} task={t} onToggle={onToggle} onDel={onDel}/>)}
+          </div>
+          <form onSubmit={e=>{e.preventDefault(); onAdd(area.id,newTitle); setNewTitle('');}} style={{display:'flex',gap:6,marginTop:8}}>
+            <input style={{...S.input,padding:'6px 8px',fontSize:13}} value={newTitle} onChange={e=>setNewTitle(e.target.value)} placeholder="Add a task…"/>
+            <button type="submit" style={{...S.btnOut,padding:'6px 10px'}}>Add</button>
+          </form>
+          {done.length>0&&(
+            <div style={{marginTop:10}}>
+              <button onClick={()=>setShowDone(s=>!s)} style={{...S.iconBtn,fontSize:12,color:'var(--text-muted)',padding:'2px 4px'}}>
+                {showDone?'▾':'▸'} Completed ({done.length})
+              </button>
+              {showDone&&<div style={{display:'flex',flexDirection:'column',gap:2,marginTop:4}}>
+                {done.map(t=><TaskRow key={t.id} task={t} onToggle={onToggle} onDel={onDel}/>)}
+              </div>}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function AreaModal({ area, onClose, onSaved }) {
+      const isEdit=!!area;
+      const [name,setName]=React.useState(area?.name||'');
+      const [color,setColor]=React.useState(area?.color||CALENDAR_COLORS[0]);
+      const [hours,setHours]=React.useState(area?String(Math.round((area.weekly_target_minutes||0)/60*10)/10):'0');
+      const [busy,setBusy]=React.useState(false);
+      const [err,setErr]=React.useState('');
+
+      async function save(e) {
+        e.preventDefault(); if(!name.trim())return;
+        setBusy(true); setErr('');
+        try {
+          const weekly=Math.round(parseFloat(hours||'0')*60);
+          const body={ name:name.trim(), color, weekly_target_minutes:weekly };
+          if(isEdit) await api(`/categories/${area.id}`,{method:'PUT',body:JSON.stringify(body)});
+          else       await api('/categories',{method:'POST',body:JSON.stringify(body)});
+          onSaved();
+        } catch(ex){ setErr(ex.message); setBusy(false); }
+      }
+
+      return (
+        <div style={S.overlay} onClick={onClose}>
+          <div style={{...S.modal,width:360}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+              <h2 style={{margin:0,fontSize:18,fontWeight:700}}>{isEdit?'Edit Area':'New Area'}</h2>
+              <button onClick={onClose} style={{...S.iconBtn,fontSize:22}}>×</button>
+            </div>
+            <form onSubmit={save}>
+              <div style={{marginBottom:16}}><label style={S.label}>Name</label><input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. French, Fitness" autoFocus required/></div>
+              <div style={{marginBottom:16}}>
+                <label style={S.label}>Color</label>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
+                  {CALENDAR_COLORS.map(c=>(
+                    <button key={c} type="button" onClick={()=>setColor(c)} style={{width:28,height:28,borderRadius:'50%',background:c,border:color===c?'3px solid #111':'3px solid transparent',cursor:'pointer',outline:'none'}}/>
+                  ))}
+                </div>
+              </div>
+              <div style={{marginBottom:20}}><label style={S.label}>Weekly target (hours)</label><input style={S.input} type="number" min="0" step="0.5" value={hours} onChange={e=>setHours(e.target.value)} placeholder="0 = no target"/></div>
+              {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
+                <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':(isEdit?'Save':'Create')}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    function AreasView({ user, onLogout, nav }) {
+      const [areas,setAreas]=React.useState([]);
+      const [tasks,setTasks]=React.useState([]);
+      const [weekMins,setWeekMins]=React.useState({});
+      const [editing,setEditing]=React.useState(null); // 'new' | area | null
+      const [err,setErr]=React.useState('');
+
+      async function loadAll() {
+        try {
+          const { from, to } = weekRange(new Date());
+          const now=new Date(); const statsTo = to>now?now:to; // elapsed time so far this week
+          const cats=await api('/categories'); setAreas(cats||[]);
+          const t=await api('/tasks'); setTasks(t||[]);
+          const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(statsTo.toISOString())}`);
+          const m={}; (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; }); setWeekMins(m);
+        } catch(ex){ setErr(ex.message); }
+      }
+      React.useEffect(()=>{ loadAll(); },[]);
+
+      async function toggleTask(t){ try{ await api(`/tasks/${t.id}`,{method:'PUT',body:JSON.stringify({done:!t.done})}); await loadAll(); }catch(ex){setErr(ex.message);} }
+      async function addTask(areaId,title){ if(!title.trim())return; try{ await api('/tasks',{method:'POST',body:JSON.stringify({area_id:areaId||null,title:title.trim()})}); await loadAll(); }catch(ex){setErr(ex.message);} }
+      async function delTask(id){ try{ await api(`/tasks/${id}`,{method:'DELETE'}); await loadAll(); }catch(ex){setErr(ex.message);} }
+
+      const tasksByArea=React.useMemo(()=>{
+        const m={};
+        tasks.forEach(t=>{ const k=t.area_id||'none'; (m[k]=m[k]||[]).push(t); });
+        return m;
+      },[tasks]);
+
+      return (
+        <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
+          <TopBar title="Areas" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}>
+            <button style={S.btnPri} onClick={()=>setEditing('new')}><span style={{fontSize:18,lineHeight:1,marginTop:-1}}>+</span> New area</button>
+          </TopBar>
+          <div style={{flex:1,overflow:'auto',background:'var(--bg-subtle)'}}>
+            <div style={{maxWidth:1100,margin:'0 auto',padding:'24px 20px 60px'}}>
+              {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:18,alignItems:'start'}}>
+                {areas.map(a=>(
+                  <AreaCard key={a.id} area={a} tasks={tasksByArea[a.id]||[]} weekMins={weekMins[a.id]||0}
+                    onToggle={toggleTask} onAdd={addTask} onDel={delTask} onEdit={()=>setEditing(a)}/>
+                ))}
+                {(tasksByArea['none']||[]).length>0&&(
+                  <AreaCard area={{id:null,name:'No area',color:'#cbd5e1',weekly_target_minutes:0}} tasks={tasksByArea['none']} weekMins={0}
+                    onToggle={toggleTask} onAdd={addTask} onDel={delTask}/>
+                )}
+              </div>
+              {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14,marginTop:20}}>No areas yet. Create one to start tracking goals and tasks.</div>}
+            </div>
+          </div>
+          {editing&&<AreaModal area={editing==='new'?null:editing} onClose={()=>setEditing(null)} onSaved={async()=>{ setEditing(null); await loadAll(); }}/>}
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // WORKSPACE ROUTER
+    // ─────────────────────────────────────────────
+    function Main({ user, onLogout }) {
+      const [workspace,setWorkspace]=React.useState('calendar');
+      const nav={ workspace, setWorkspace };
+      if(workspace==='log')   return <LogView user={user} onLogout={onLogout} nav={nav}/>;
+      if(workspace==='areas') return <AreasView user={user} onLogout={onLogout} nav={nav}/>;
+      return <CalendarApp user={user} onLogout={onLogout} nav={nav}/>;
+    }
+
+    // ─────────────────────────────────────────────
+    // ROOT
+    // ─────────────────────────────────────────────
+    function App() {
+      const [user,setUser]=React.useState(null);
+      const [ready,setReady]=React.useState(false);
+      React.useEffect(()=>{
+        if(!getToken()){setReady(true);return;}
+        api('/users/me').then(u=>{setUser(u);setReady(true);}).catch(()=>{clearToken();setReady(true);});
+      },[]);
+      if(!ready) return <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-muted)',fontSize:14}}>Loading…</div>;
+      if(!user)  return <AuthPage onAuth={setUser}/>;
+      return <Main user={user} onLogout={()=>{clearToken();setUser(null);}}/>;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>

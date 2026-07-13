@@ -2,15 +2,14 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/hylin/calendar/internal/db"
 	"github.com/hylin/calendar/notification/internal/mailer"
 	"github.com/hylin/calendar/notification/internal/worker"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -26,15 +25,7 @@ func main() {
 		log.Fatalf("connect to redis: %v", err)
 	}
 
-	dsn := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
-		getEnv("DB_HOST", "localhost"),
-		getEnv("DB_PORT", "5432"),
-		getEnv("DB_USER", "calendar"),
-		getEnv("DB_PASSWORD", "calendar"),
-		getEnv("DB_NAME", "calendar"),
-	)
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := db.NewPool(ctx)
 	if err != nil {
 		log.Fatalf("connect to db: %v", err)
 	}

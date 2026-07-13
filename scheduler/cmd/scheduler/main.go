@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/hylin/calendar/scheduler/internal/db"
+	"github.com/hylin/calendar/internal/db"
 	"github.com/hylin/calendar/scheduler/internal/worker"
 )
 
