@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -377,14 +379,17 @@ func (r *RecurringEventRepository) GeneratePending(ctx context.Context) error {
 		return err
 	}
 
+	// One bad rule must not block window extension for the rest: attempt every
+	// rule and report the failures together.
+	var errs []error
 	for i := range rules {
 		rec := &rules[i]
 		from := rec.GeneratedUntil
 		if err := r.generateWindow(ctx, rec, from, horizon); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("recurring rule %s: %w", rec.ID, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (r *RecurringEventRepository) generateWindow(ctx context.Context, rec *model.RecurringEvent, from, until time.Time) error {

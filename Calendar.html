@@ -558,7 +558,9 @@
             ? `${form.end_date}T23:59:59Z`
             : new Date(`${form.end_date}T${form.end_time}:00`).toISOString();
           const body = {title:form.title.trim(),description:form.description,location:form.location,calendar_id:form.calendar_id,start_time:startISO,end_time:endISO,all_day:form.all_day};
-          if(form.category_id) body.category_id=form.category_id;
+          // Explicit null clears the category on edit ("None" selected);
+          // omitting the field would keep the current one.
+          body.category_id = form.category_id || null;
           const saved = isEdit
             ? await api(`/events/${event.id}`,{method:'PUT', body:JSON.stringify(body)})
             : await api('/events',              {method:'POST',body:JSON.stringify(body)});
@@ -897,9 +899,20 @@
         if(!(mins>0)){ setErr('Duration must be greater than zero'); return; }
         setBusy(true);
         try {
-          // A log entry is a calendar event: place it at noon on the chosen day
-          // and span it by the entered duration. Title carries the sub-activity.
-          const start=new Date(`${form.date}T12:00:00`);
+          // A log entry is a calendar event; title carries the sub-activity.
+          // The Log view only shows sessions with start_time <= now ("elapsed
+          // time"), so anchor today's entries to end at now — placing them at
+          // noon would hide a morning entry until 12:00. Backdated days keep
+          // noon. Clamp to midnight so an early-morning entry can't spill into
+          // the previous day.
+          let start;
+          if(form.date===ymd(new Date())){
+            start=new Date(Date.now()-mins*60000);
+            const dayStart=new Date(`${form.date}T00:00:00`);
+            if(start<dayStart) start=dayStart;
+          } else {
+            start=new Date(`${form.date}T12:00:00`);
+          }
           const end=new Date(start.getTime()+mins*60000);
           const areaName=(areas.find(a=>a.id===form.area_id)||{}).name;
           const body={

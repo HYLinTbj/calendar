@@ -32,10 +32,12 @@ type CreateTaskRequest struct {
 }
 
 type UpdateTaskRequest struct {
-	AreaID   *uuid.UUID `json:"area_id"`
-	Title    *string    `json:"title"`
-	Notes    *string    `json:"notes"`
-	Done     *bool      `json:"done"`
-	DueDate  *time.Time `json:"due_date"`
-	Position *int       `json:"position"`
+	// AreaID and DueDate are Optional so an explicit null clears them; an
+	// absent field keeps the current value.
+	AreaID   Optional[uuid.UUID] `json:"area_id"`
+	Title    *string             `json:"title"`
+	Notes    *string             `json:"notes"`
+	Done     *bool               `json:"done"`
+	DueDate  Optional[time.Time] `json:"due_date"`
+	Position *int                `json:"position"`
 }

@@ -67,6 +67,7 @@ type UpdateEventRequest struct {
 	Reminders   []Reminder `json:"reminders"`
 	AllDay      *bool      `json:"all_day"`
 	Timezone    *string    `json:"timezone"`
-	CategoryID  *uuid.UUID `json:"category_id"`
-	Visibility  *string    `json:"visibility"`
+	// Optional so an explicit null clears the category; absent keeps it.
+	CategoryID Optional[uuid.UUID] `json:"category_id"`
+	Visibility *string             `json:"visibility"`
 }

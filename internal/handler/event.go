@@ -297,8 +297,12 @@ func (h *EventHandler) updateRecurrenceThis(c *gin.Context, ownerID, id uuid.UUI
 		Reminders:   req.Reminders,
 		AllDay:      req.AllDay,
 		Timezone:    req.Timezone,
-		CategoryID:  req.CategoryID,
 		Visibility:  req.Visibility,
+	}
+	// Recurrence updates use a plain pointer (nil = keep), so a category can
+	// only be set here, not cleared.
+	if req.CategoryID != nil {
+		updateReq.CategoryID = model.Optional[uuid.UUID]{Set: true, Value: req.CategoryID}
 	}
 	updated, err := h.repo.Update(ctx, id, ownerID, updateReq)
 	if err == pgx.ErrNoRows {

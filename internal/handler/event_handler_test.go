@@ -253,6 +253,48 @@ func TestEventHandler_Update_TitleOnly(t *testing.T) {
 	assert.Equal(t, "Updated", updated.Title)
 }
 
+func TestEventHandler_Update_ClearCategory(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_cc")
+	areaID := createCategory(t, token, "French", 0)
+
+	wCreate := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title":       "reading",
+		"start_time":  "2024-06-15T09:00:00Z",
+		"end_time":    "2024-06-15T10:00:00Z",
+		"category_id": areaID,
+	})
+	require.Equal(t, http.StatusCreated, wCreate.Code, "body: %s", wCreate.Body.String())
+	var evResp struct {
+		ID         uuid.UUID  `json:"id"`
+		CategoryID *uuid.UUID `json:"category_id"`
+	}
+	require.NoError(t, json.NewDecoder(wCreate.Body).Decode(&evResp))
+	require.NotNil(t, evResp.CategoryID)
+
+	// Omitting category_id keeps the current one.
+	wKeep := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", evResp.ID), token, map[string]interface{}{
+		"title": "still reading",
+	})
+	require.Equal(t, http.StatusOK, wKeep.Code)
+	var kept struct {
+		CategoryID *uuid.UUID `json:"category_id"`
+	}
+	require.NoError(t, json.NewDecoder(wKeep.Body).Decode(&kept))
+	assert.NotNil(t, kept.CategoryID)
+
+	// An explicit null clears it.
+	wClear := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", evResp.ID), token, map[string]interface{}{
+		"category_id": nil,
+	})
+	require.Equal(t, http.StatusOK, wClear.Code, "body: %s", wClear.Body.String())
+	var cleared struct {
+		CategoryID *uuid.UUID `json:"category_id"`
+	}
+	require.NoError(t, json.NewDecoder(wClear.Body).Decode(&cleared))
+	assert.Nil(t, cleared.CategoryID)
+}
+
 func TestEventHandler_Update_NotFound(t *testing.T) {
 	truncateAll(t, testPool)
 	_, token := MustRegisterAndLogin(t, testRouter, "evh_j")

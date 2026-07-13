@@ -309,8 +309,8 @@ func (r *EventRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req
 	if req.Timezone != nil {
 		current.Timezone = *req.Timezone
 	}
-	if req.CategoryID != nil {
-		current.CategoryID = req.CategoryID
+	if req.CategoryID.Set {
+		current.CategoryID = req.CategoryID.Value
 	}
 	if req.Visibility != nil {
 		current.Visibility = *req.Visibility

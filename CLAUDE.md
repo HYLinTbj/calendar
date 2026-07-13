@@ -35,7 +35,7 @@ Schema is created/upgraded automatically at api startup (see migrations below) �
 
 ### Frontend without Docker
 
-`Calendar.html` is a single self-contained file (React 18 + Babel via CDN, shared `S` style object, an `api()` fetch helper, `API_BASE` hardcoded to `http://localhost:8080`). `mock_api.py` is a stdlib-only mock of the API on `:8080` with CORS + seed data. To iterate on the UI alone: run `python3 mock_api.py` and open `Calendar.html` directly. Keep `mock_api.py`'s response shapes in sync with the Go handlers when you change an endpoint. To verify the mock live here, background it and poll with `curl --retry-connrefused --retry 20 http://localhost:8080/health` (foreground `sleep` is blocked); the `kill` afterward exits nonzero — not a failure.
+`Calendar.html` is a single self-contained file (React 18 + Babel via CDN, shared `S` style object, an `api()` fetch helper, `API_BASE` hardcoded to `http://localhost:8080`). To iterate on the UI alone, serve a mock of the API on `:8080` (with CORS headers) and open `Calendar.html` directly. `mock_api.py` is the conventional name for that mock — a stdlib-only Python server with seed data — but it is a **local, untracked helper** (gitignored, not part of the repo): write one if it's missing, and keep its response shapes in sync with the Go handlers when you change an endpoint. To verify the mock live here, background it and poll with `curl --retry-connrefused --retry 20 http://localhost:8080/health` (foreground `sleep` is blocked); the `kill` afterward exits nonzero — not a failure.
 
 ## Architecture
 

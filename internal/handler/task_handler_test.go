@@ -50,6 +50,35 @@ func TestTask_CreateListToggle(t *testing.T) {
 	assert.Len(t, stillOpen, 0)
 }
 
+func TestTask_ClearArea(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "th_d")
+	areaID := createCategory(t, token, "Fitness", 0)
+
+	w := Do(t, testRouter, "POST", "/tasks", token, map[string]any{
+		"area_id": areaID,
+		"title":   "Stretch",
+	})
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+	var task model.Task
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&task))
+	require.NotNil(t, task.AreaID)
+
+	// Omitting area_id keeps it.
+	w = Do(t, testRouter, "PUT", "/tasks/"+task.ID.String(), token, map[string]any{"notes": "hips"})
+	require.Equal(t, http.StatusOK, w.Code)
+	var kept model.Task
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&kept))
+	assert.NotNil(t, kept.AreaID)
+
+	// An explicit null clears it.
+	w = Do(t, testRouter, "PUT", "/tasks/"+task.ID.String(), token, map[string]any{"area_id": nil})
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var cleared model.Task
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&cleared))
+	assert.Nil(t, cleared.AreaID)
+}
+
 func TestTask_RequiresTitle(t *testing.T) {
 	truncateAll(t, testPool)
 	_, token := MustRegisterAndLogin(t, testRouter, "th_b")

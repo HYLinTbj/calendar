@@ -80,8 +80,8 @@ func (r *TaskRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req 
 	if err != nil {
 		return nil, err
 	}
-	if req.AreaID != nil {
-		current.AreaID = req.AreaID
+	if req.AreaID.Set {
+		current.AreaID = req.AreaID.Value
 	}
 	if req.Title != nil {
 		current.Title = *req.Title
@@ -89,8 +89,8 @@ func (r *TaskRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req 
 	if req.Notes != nil {
 		current.Notes = *req.Notes
 	}
-	if req.DueDate != nil {
-		current.DueDate = req.DueDate
+	if req.DueDate.Set {
+		current.DueDate = req.DueDate.Value
 	}
 	if req.Position != nil {
 		current.Position = *req.Position
