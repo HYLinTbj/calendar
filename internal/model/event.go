@@ -21,24 +21,24 @@ type AttendeeStatus struct {
 }
 
 type Event struct {
-	ID               uuid.UUID  `json:"id"`
-	OwnerID          uuid.UUID  `json:"owner_id"`
-	CalendarID       uuid.UUID  `json:"calendar_id"`
-	Title            string     `json:"title"`
-	Description      string     `json:"description"`
-	Location         string     `json:"location"`
-	StartTime        time.Time  `json:"start_time"`
-	EndTime          time.Time  `json:"end_time"`
+	ID               uuid.UUID        `json:"id"`
+	OwnerID          uuid.UUID        `json:"owner_id"`
+	CalendarID       uuid.UUID        `json:"calendar_id"`
+	Title            string           `json:"title"`
+	Description      string           `json:"description"`
+	Location         string           `json:"location"`
+	StartTime        time.Time        `json:"start_time"`
+	EndTime          time.Time        `json:"end_time"`
 	Attendees        []string         `json:"attendees"`
 	AttendeeStatuses []AttendeeStatus `json:"attendee_statuses,omitempty"`
 	Reminders        []Reminder       `json:"reminders"`
 	AllDay           bool             `json:"all_day"`
-	Timezone         string     `json:"timezone"`
-	Visibility       string     `json:"visibility"` // "public" | "private"
-	CategoryID       *uuid.UUID `json:"category_id,omitempty"`
-	RecurringEventID *uuid.UUID `json:"recurring_event_id,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	Timezone         string           `json:"timezone"`
+	Visibility       string           `json:"visibility"` // "public" | "private"
+	CategoryID       *uuid.UUID       `json:"category_id,omitempty"`
+	RecurringEventID *uuid.UUID       `json:"recurring_event_id,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
 }
 
 type CreateEventRequest struct {

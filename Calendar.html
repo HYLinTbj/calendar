@@ -7,6 +7,23 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- Theme tokens inlined so this single-file app renders correctly even when styles.css is not loaded
+       (opened as a local file, copied without styles.css, or a broken bind mount). styles.css, if present,
+       redefines the same values plus scrollbar/focus niceties. -->
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-subtle: #f9fafb;
+      --border: #e5e7eb;
+      --text: #111827;
+      --text-muted: #6b7280;
+      --accent: #4f46e5;
+      --accent-light: #eef2ff;
+      --sidebar-width: 240px;
+      --header-height: 60px;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+  </style>
   <link rel="stylesheet" href="styles.css">
   <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
@@ -32,7 +49,7 @@
       btnOut:  { padding:'8px 16px', background:'transparent', color:'var(--text)', border:'1px solid var(--border)', borderRadius:8, fontSize:14, fontWeight:500, cursor:'pointer' },
       iconBtn: { background:'none', border:'none', cursor:'pointer', padding:'4px 8px', borderRadius:6, fontSize:16, color:'var(--text-muted)', lineHeight:1, display:'inline-flex', alignItems:'center' },
       overlay: { position:'fixed', inset:0, background:'rgba(0,0,0,0.45)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 },
-      modal:   { background:'#fff', borderRadius:16, padding:28, boxShadow:'0 20px 60px rgba(0,0,0,0.2)', maxHeight:'90vh', overflow:'auto' },
+      modal:   { background:'#fff', borderRadius:16, padding:28, boxShadow:'0 20px 60px rgba(0,0,0,0.2)', maxHeight:'90vh', maxWidth:'calc(100vw - 32px)', overflowX:'hidden', overflowY:'auto' },
     };
 
     // ─────────────────────────────────────────────
@@ -207,7 +224,7 @@
     // ─────────────────────────────────────────────
     // SIDEBAR
     // ─────────────────────────────────────────────
-    function Sidebar({ currentDate, onDateSelect, calendars, selCals, onToggleCal, categories, eventDays, onNewEvent, onNewCalendar }) {
+    function Sidebar({ currentDate, onDateSelect, calendars, selCals, onToggleCal, categories, eventDays, onNewEvent, onNewCalendar, onNewArea, onEditArea }) {
       return (
         <div style={{width:'var(--sidebar-width)',borderRight:'1px solid var(--border)',background:'#fff',display:'flex',flexDirection:'column',flexShrink:0,overflowY:'auto'}}>
           <div style={{padding:'16px 12px 0'}}>
@@ -242,17 +259,23 @@
             ))}
           </div>
 
-          {categories.length>0&&(
-            <div style={{padding:'0 10px',marginTop:8}}>
-              <div style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.05em',padding:'6px 4px 4px'}}>Categories</div>
-              {categories.map(cat=>(
-                <div key={cat.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 4px',fontSize:13}}>
-                  <span style={{width:10,height:10,borderRadius:'50%',background:cat.color||'#999',flexShrink:0}}/>
-                  <span>{cat.name}</span>
-                </div>
-              ))}
+          <div style={{padding:'0 10px',marginTop:8}}>
+            <div style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.05em',padding:'6px 4px 4px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <span>Areas</span>
+              <button onClick={onNewArea} style={{...S.iconBtn,fontSize:18,padding:'2px 6px'}} title="New area">+</button>
             </div>
-          )}
+            {categories.map(cat=>(
+              <div key={cat.id} onClick={()=>onEditArea(cat)} title="Edit area"
+                style={{display:'flex',alignItems:'center',gap:8,padding:'4px 4px',fontSize:13,cursor:'pointer',borderRadius:6,userSelect:'none'}}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-subtle)'}
+                onMouseLeave={e=>e.currentTarget.style.background=''}>
+                <span style={{width:10,height:10,borderRadius:'50%',background:cat.color||'#999',flexShrink:0}}/>
+                <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{cat.name}</span>
+                <span style={{fontSize:12,color:'var(--text-muted)'}}>✎</span>
+              </div>
+            ))}
+            {categories.length===0&&<div style={{fontSize:12,color:'var(--text-muted)',padding:'2px 4px 6px'}}>No areas yet</div>}
+          </div>
         </div>
       );
     }
@@ -396,11 +419,13 @@
     // ─────────────────────────────────────────────
     // TIME GRID (week + day)
     // ─────────────────────────────────────────────
-    function TimeGrid({ days, events, calendars, categories, onSlotClick, onEventClick }) {
+    function TimeGrid({ days, events, calendars, categories, onSlotClick, onEventClick, onEventDrop }) {
       const ref=React.useRef(null);
       React.useEffect(()=>{ if(ref.current) ref.current.scrollTop=7*HOUR_H-30; },[]);
       const today=new Date();
       const HOURS=Array.from({length:24},(_,i)=>i);
+      const [drag,setDrag]=React.useState(null); // { evt, dayIndex, startMin, durMin, moved, ... }
+      const suppressClick=React.useRef(0); // timestamp of last drag end; swallows the trailing click
 
       const byDay=React.useMemo(()=>{
         const m={};
@@ -409,13 +434,107 @@
         return m;
       },[days,events]);
 
-      function evStyle(evt,col) {
+      // Apply the in-progress drag as a preview: pull the dragged event out of its
+      // origin day and drop a repositioned clone into the target day/time.
+      const renderByDay=React.useMemo(()=>{
+        if(!drag||!drag.moved) return byDay;
+        const m={}; for(const key in byDay) m[key]=byDay[key].filter(e=>e.id!==drag.evt.id);
+        const day=days[drag.dayIndex]; const k=ymd(day);
+        const ns=new Date(day); ns.setHours(0,0,0,0); ns.setMinutes(drag.startMin);
+        const ne=new Date(ns.getTime()+drag.durMin*60000);
+        (m[k]=m[k]||[]).push({...drag.evt,start_time:ns.toISOString(),end_time:ne.toISOString(),_drag:true});
+        return m;
+      },[byDay,drag,days]);
+
+      // Assign overlapping events to side-by-side columns: cluster events that
+      // transitively overlap, give each the first column that's free at its start,
+      // then share the cluster's width equally. Returns {id: {col, cols}}.
+      // Uses the same 30-min minimum as evStyle so visually-touching events split too.
+      function layoutDay(evts) {
+        const items=evts.map(e=>{
+          const s=new Date(e.start_time).getTime();
+          const en=Math.max(new Date(e.end_time).getTime(),s+30*60000);
+          return {id:e.id,s,en};
+        }).sort((a,b)=>a.s-b.s||b.en-a.en);
+        const lay={};
+        let cluster=[],colEnds=[],clusterEnd=-Infinity;
+        const flush=()=>{ cluster.forEach(it=>{lay[it.id].cols=colEnds.length;}); cluster=[]; colEnds=[]; };
+        items.forEach(it=>{
+          if(cluster.length&&it.s>=clusterEnd) flush();
+          let c=colEnds.findIndex(end=>end<=it.s);
+          if(c===-1){ c=colEnds.length; colEnds.push(it.en); } else colEnds[c]=it.en;
+          lay[it.id]={col:c,cols:1};
+          cluster.push(it);
+          clusterEnd=Math.max(clusterEnd,it.en);
+        });
+        flush();
+        return lay;
+      }
+
+      function evStyle(evt,col,pos,dragging) {
         const s=new Date(evt.start_time), en=new Date(evt.end_time);
         const top=(s.getHours()*60+s.getMinutes())*(HOUR_H/60);
         const dur=Math.max((en-s)/60000,30);
-        return { position:'absolute',top,height:Math.max(dur*(HOUR_H/60)-2,20),left:2,right:2,
-                 background:col,borderRadius:5,padding:'2px 6px',overflow:'hidden',cursor:'pointer',
-                 color:'#fff',fontSize:11,fontWeight:500,zIndex:1 };
+        const w=100/pos.cols;
+        // border-box so the 6px padding stays inside the width — otherwise events
+        // spilled past the day column's right border.
+        return { position:'absolute',top,height:Math.max(dur*(HOUR_H/60)-2,20),
+                 left:`calc(${pos.col*w}% + 2px)`,width:`calc(${w}% - 6px)`,boxSizing:'border-box',
+                 background:col,borderRadius:5,padding:'2px 6px',overflow:'hidden',
+                 cursor:dragging?'grabbing':'grab',color:'#fff',fontSize:11,fontWeight:500,
+                 zIndex:dragging?5:1,opacity:dragging?0.95:1,
+                 boxShadow:dragging?'0 6px 16px rgba(0,0,0,0.28)':'none',
+                 touchAction:'none',userSelect:'none',WebkitUserSelect:'none' };
+      }
+
+      // Pointer-drag an event to reschedule it: vertical = 15-min steps, horizontal
+      // = day columns (week view). Moving past a small threshold suppresses the click
+      // so it reschedules instead of opening the editor; the drop preserves duration.
+      function onEventDown(e, evt, di) {
+        if(e.button!==0 || evt.all_day || !onEventDrop) return;
+        const s=new Date(evt.start_time), en=new Date(evt.end_time);
+        const base={ evt, originDayIndex:di, originStartMin:s.getHours()*60+s.getMinutes(),
+                     durMin:Math.max(Math.round((en-s)/60000),15), startX:e.clientX, startY:e.clientY };
+        let cur={...base,dayIndex:di,startMin:base.originStartMin,moved:false};
+        setDrag(cur);
+        const move=ev=>{
+          if(!cur.moved && Math.abs(ev.clientX-base.startX)<4 && Math.abs(ev.clientY-base.startY)<4) return;
+          ev.preventDefault();
+          document.body.style.cursor='grabbing'; document.body.style.userSelect='none';
+          const deltaMin=Math.round(((ev.clientY-base.startY)/HOUR_H*60)/15)*15;
+          const startMin=Math.max(0,Math.min(24*60-base.durMin,base.originStartMin+deltaMin));
+          let dayIndex=base.originDayIndex;
+          const el=ref.current;
+          if(el && days.length>1){
+            const r=el.getBoundingClientRect();
+            const colW=(el.clientWidth-52)/days.length; // clientWidth excludes the scrollbar
+            dayIndex=Math.max(0,Math.min(days.length-1,Math.floor((ev.clientX-r.left-52)/colW)));
+          }
+          cur={...base,dayIndex,startMin,moved:true};
+          setDrag(cur);
+        };
+        // finish tears down listeners and restores body styles. The browser can end
+        // a drag with pointercancel (touch gesture takeover, focus loss, pen leaving
+        // range) and never fire pointerup, so we listen for both; a cancelled drag
+        // discards the drop and just drops the preview.
+        const finish=cancelled=>{
+          window.removeEventListener('pointermove',move);
+          window.removeEventListener('pointerup',up);
+          window.removeEventListener('pointercancel',cancel);
+          document.body.style.cursor=''; document.body.style.userSelect='';
+          if(!cancelled && cur.moved){
+            suppressClick.current=Date.now();
+            const day=days[cur.dayIndex];
+            const ns=new Date(day); ns.setHours(0,0,0,0); ns.setMinutes(cur.startMin);
+            onEventDrop(base.evt, ns, new Date(ns.getTime()+base.durMin*60000));
+          }
+          setDrag(null);
+        };
+        const up=()=>finish(false);
+        const cancel=()=>finish(true);
+        window.addEventListener('pointermove',move);
+        window.addEventListener('pointerup',up);
+        window.addEventListener('pointercancel',cancel);
       }
 
       return (
@@ -453,22 +572,29 @@
               {/* columns */}
               {days.map((day,di)=>{
                 const k=ymd(day);
-                const dayEvts=byDay[k]||[];
+                const dayEvts=renderByDay[k]||[];
                 return (
                   <div key={di} style={{flex:1,position:'relative',borderLeft:'1px solid var(--border)'}}>
                     {HOURS.map(h=>(
                       <div key={h} style={{position:'absolute',top:h*HOUR_H,left:0,right:0,height:HOUR_H,borderTop:'1px solid var(--border)',cursor:'pointer'}}
-                           onClick={()=>{ const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
+                           onClick={()=>{ if(Date.now()-suppressClick.current<300) return; const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
                     ))}
-                    {dayEvts.filter(e=>!e.all_day).map(evt=>{
-                      const col=getEventColor(evt,calendars,categories);
-                      return (
-                        <div key={evt.id} style={evStyle(evt,col)} onClick={e=>{e.stopPropagation();onEventClick(evt);}}>
-                          <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{evt.title}</div>
-                          <div style={{opacity:0.85,fontSize:10}}>{fmtTime(evt.start_time)}</div>
-                        </div>
-                      );
-                    })}
+                    {(()=>{
+                      const timed=dayEvts.filter(e=>!e.all_day);
+                      const lay=layoutDay(timed);
+                      return timed.map(evt=>{
+                        const col=getEventColor(evt,calendars,categories);
+                        const dragging=!!evt._drag;
+                        return (
+                          <div key={evt.id} style={{...evStyle(evt,col,lay[evt.id],dragging),...(dragging?{pointerEvents:'none'}:null)}}
+                               onPointerDown={dragging?undefined:e=>onEventDown(e,evt,di)}
+                               onClick={e=>{ e.stopPropagation(); if(Date.now()-suppressClick.current<300) return; onEventClick(evt); }}>
+                            <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{evt.title}</div>
+                            <div style={{opacity:0.85,fontSize:10}}>{fmtTime(evt.start_time)}</div>
+                          </div>
+                        );
+                      });
+                    })()}
                     {sameDay(day,today)&&<NowLine/>}
                   </div>
                 );
@@ -523,8 +649,9 @@
     // ─────────────────────────────────────────────
     // EVENT MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function EventModal({ event, defaultDate, calendars, categories, onSave, onDelete, onClose }) {
+    function EventModal({ event, defaultDate, calendars, categories, onSave, onDelete, onClose, onCategoryCreated }) {
       const isEdit = !!event?.id;
+      const [newArea,setNewArea]=React.useState(false);
       const defStart = React.useMemo(()=>{
         if(defaultDate){ const d=new Date(defaultDate); d.setSeconds(0,0); return d; }
         const d=new Date(); d.setMinutes(0,0,0); return d;
@@ -547,8 +674,31 @@
       const [err,setErr]=React.useState('');
       const set=k=>e=>setForm(f=>({...f,[k]:e.target.type==='checkbox'?e.target.checked:e.target.value}));
 
+      // Combine the date + time string fields into a local Date (matches save()).
+      const combine=(d,t)=>new Date(`${d}T${t||'00:00'}:00`);
+      // Changing the start shifts the end to keep the current duration (repairing
+      // to 1h if the range was invalid), so the end always stays after the start.
+      const setStart=k=>e=>setForm(f=>{
+        const next={...f,[k]:e.target.value};
+        if(f.all_day){
+          const delta=Math.round((new Date(next.start_date+'T00:00:00')-new Date(f.start_date+'T00:00:00'))/86400000);
+          if(delta) next.end_date=ymd(addDays(new Date(f.end_date+'T00:00:00'),delta));
+        } else {
+          let dur=combine(f.end_date,f.end_time)-combine(f.start_date,f.start_time);
+          if(!(dur>0)) dur=3600000;
+          const ns=combine(next.start_date,next.start_time);
+          if(!isNaN(ns.getTime())){ const ne=new Date(ns.getTime()+dur); next.end_date=ymd(ne); next.end_time=hhmm(ne); }
+        }
+        return next;
+      });
+      const rangeInvalid = form.all_day
+        ? form.end_date < form.start_date
+        : !(combine(form.end_date,form.end_time)>combine(form.start_date,form.start_time));
+
       async function save(e) {
-        e.preventDefault(); if(!form.title.trim()){setErr('Title is required');return;}
+        e.preventDefault();
+        if(!form.title.trim()){setErr('Title is required');return;}
+        if(rangeInvalid){setErr(form.all_day?'End date must be on or after the start date.':'End time must be after the start time.');return;}
         setBusy(true); setErr('');
         try {
           const startISO = form.all_day
@@ -588,12 +738,15 @@
                 <input style={{...S.input,fontSize:16,fontWeight:500}} value={form.title} onChange={set('title')} placeholder="Event title" autoFocus required/>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
-                <div><label style={S.label}>Date</label><input style={S.input} type="date" value={form.start_date} onChange={set('start_date')}/></div>
-                {!form.all_day&&<div><label style={S.label}>Start time</label><input style={S.input} type="time" value={form.start_time} onChange={set('start_time')}/></div>}
+                <div><label style={S.label}>Date</label><input style={S.input} type="date" value={form.start_date} onChange={setStart('start_date')}/></div>
+                {!form.all_day&&<div><label style={S.label}>Start time</label><input style={S.input} type="time" value={form.start_time} onChange={setStart('start_time')}/></div>}
               </div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:14}}>
-                <div><label style={S.label}>End date</label><input style={S.input} type="date" value={form.end_date} onChange={set('end_date')}/></div>
-                {!form.all_day&&<div><label style={S.label}>End time</label><input style={S.input} type="time" value={form.end_time} onChange={set('end_time')}/></div>}
+              <div style={{marginBottom:14}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                  <div><label style={S.label}>End date</label><input style={S.input} type="date" min={form.start_date} value={form.end_date} onChange={set('end_date')}/></div>
+                  {!form.all_day&&<div><label style={S.label}>End time</label><input style={S.input} type="time" min={form.end_date===form.start_date?form.start_time:undefined} value={form.end_time} onChange={set('end_time')}/></div>}
+                </div>
+                {rangeInvalid&&<div style={{color:'#dc2626',fontSize:12,marginTop:6}}>{form.all_day?'End date must be on or after the start date.':'End time must be after the start time.'}</div>}
               </div>
               <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer',marginBottom:14}}>
                 <input type="checkbox" checked={form.all_day} onChange={set('all_day')} style={{width:14,height:14,accentColor:'var(--accent)'}}/>
@@ -608,23 +761,26 @@
                     {calendars.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </div>
-                {categories.length>0&&(
-                  <div>
-                    <label style={S.label}>Category</label>
-                    <select style={S.input} value={form.category_id} onChange={set('category_id')}>
-                      <option value="">None</option>
-                      {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
+                <div>
+                  <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
+                    <label style={S.label}>Area</label>
+                    <button type="button" onClick={()=>setNewArea(true)} style={{...S.iconBtn,fontSize:12,padding:'0 2px',color:'var(--accent)',fontWeight:600}}>+ New</button>
                   </div>
-                )}
+                  <select style={S.input} value={form.category_id} onChange={set('category_id')}>
+                    <option value="">None</option>
+                    {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
               </div>
               {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14,padding:'8px 10px',background:'#fef2f2',borderRadius:6}}>{err}</div>}
-              <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap'}}>
                 {isEdit&&<button type="button" onClick={del} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>Delete</button>}
                 <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
-                <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':'Save'}</button>
+                <button type="submit" disabled={busy||rangeInvalid} style={S.btnPri}>{busy?'Saving…':'Save'}</button>
               </div>
             </form>
+            {newArea&&<AreaModal onClose={()=>setNewArea(false)}
+              onSaved={cat=>{ onCategoryCreated&&onCategoryCreated(cat); setForm(f=>({...f,category_id:cat.id})); setNewArea(false); }}/>}
           </div>
         </div>
       );
@@ -686,6 +842,7 @@
       const [selCals,setSel] = React.useState(new Set());
       const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
       const [newCal,setNewCal]= React.useState(false);
+      const [areaModal,setAreaModal]=React.useState(null); // 'new' | area | null
       const [search,setSearch]= React.useState('');
       const [showSearch,setShowSearch]=React.useState(false);
 
@@ -724,7 +881,24 @@
       function toggleCal(id){ setSel(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; }); }
       function eventSaved(saved){ setEvts(es=>{ const i=es.findIndex(e=>e.id===saved.id); return i>=0?[...es.slice(0,i),saved,...es.slice(i+1)]:[...es,saved]; }); setModal(null); }
       function eventDeleted(id){ setEvts(es=>es.filter(e=>e.id!==id)); setModal(null); }
+      // Drag-to-reschedule: optimistically move the event, PUT the new times, roll back on failure.
+      async function eventMoved(evt, start, end){
+        const startISO=start.toISOString(), endISO=end.toISOString();
+        if(evt.start_time===startISO && evt.end_time===endISO) return;
+        setEvts(es=>es.map(e=>e.id===evt.id?{...e,start_time:startISO,end_time:endISO}:e));
+        try{
+          const saved=await api(`/events/${evt.id}`,{method:'PUT',body:JSON.stringify({start_time:startISO,end_time:endISO})});
+          setEvts(es=>es.map(e=>e.id===saved.id?saved:e));
+        }catch(ex){
+          // Roll back just this event's times so a concurrent change elsewhere
+          // (another drag, a modal save) isn't reverted along with it.
+          setEvts(es=>es.map(e=>e.id===evt.id?{...e,start_time:evt.start_time,end_time:evt.end_time}:e));
+          alert('Could not move event: '+ex.message);
+        }
+      }
       function calCreated(c){ setCals(cs=>[...cs,c]); setSel(s=>new Set([...s,c.id])); setNewCal(false); }
+      function catSaved(cat){ setCats(cs=>{ const i=cs.findIndex(c=>c.id===cat.id); return i>=0?[...cs.slice(0,i),cat,...cs.slice(i+1)]:[...cs,cat]; }); }
+      function catDeleted(id){ setCats(cs=>cs.filter(c=>c.id!==id)); setAreaModal(null); }
 
       const visible = events.filter(e=>selCals.has(e.calendar_id));
       const eventDays = React.useMemo(()=>new Set(events.map(evtKey)),[events]);
@@ -751,17 +925,21 @@
               calendars={calendars} selCals={selCals} onToggleCal={toggleCal}
               categories={cats} eventDays={eventDays}
               onNewEvent={()=>setModal({defaultDate:date})}
-              onNewCalendar={()=>setNewCal(true)}/>
+              onNewCalendar={()=>setNewCal(true)}
+              onNewArea={()=>setAreaModal('new')}
+              onEditArea={a=>setAreaModal(a)}/>
 
             <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               {view==='month'&&<MonthView currentDate={date} events={visible} calendars={calendars} categories={cats} onDayClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
-              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
-              {view==='day'&&<TimeGrid days={[date]} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
+              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='day'&&<TimeGrid days={[date]} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
             </div>
           </div>
 
-          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} onSave={eventSaved} onDelete={eventDeleted} onClose={()=>setModal(null)}/>}
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} onSave={eventSaved} onDelete={eventDeleted} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
           {newCal&&<NewCalendarModal onSave={calCreated} onClose={()=>setNewCal(false)}/>}
+          {areaModal&&<AreaModal area={areaModal==='new'?null:areaModal} onClose={()=>setAreaModal(null)}
+            onSaved={cat=>{ catSaved(cat); setAreaModal(null); }} onDeleted={catDeleted}/>}
         </div>
       );
     }
@@ -806,19 +984,19 @@
     // ─────────────────────────────────────────────
     // LOG VIEW — record sessions, see weekly stats
     // ─────────────────────────────────────────────
-    function StatsPanel({ stats }) {
+    function StatsPanel({ stats, label='This week', showTargets=true }) {
       if(!stats) return null;
       const areas=(stats.areas||[]).slice().sort((a,b)=>b.total_minutes-a.total_minutes);
       const grand=areas.reduce((s,a)=>s+a.total_minutes,0);
       return (
         <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:14}}>
-            <div style={{fontSize:14,fontWeight:600}}>This week</div>
+            <div style={{fontSize:14,fontWeight:600}}>{label}</div>
             <div style={{fontSize:13,color:'var(--text-muted)'}}>{fmtMins(grand)} total</div>
           </div>
-          {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14}}>Nothing logged this week yet.</div>}
+          {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14}}>Nothing logged in this period yet.</div>}
           {areas.map(a=>{
-            const tgt=a.weekly_target_minutes||0;
+            const tgt=showTargets?(a.weekly_target_minutes||0):0;
             const pct=tgt>0?Math.min(100,Math.round(a.total_minutes/tgt*100)):(grand>0?Math.round(a.total_minutes/grand*100):0);
             return (
               <div key={a.area_id||'none'} style={{marginBottom:12}}>
@@ -874,22 +1052,37 @@
       const [form,setForm]=React.useState(blankForm);
       const [err,setErr]=React.useState('');
       const [busy,setBusy]=React.useState(false);
+      const [newArea,setNewArea]=React.useState(false);
+      const [range,setRange]=React.useState('week'); // week|lastweek|month|30d|custom
+      const [customFrom,setCustomFrom]=React.useState(ymd(startOfWeek(new Date())));
+      const [customTo,setCustomTo]=React.useState(ymd(new Date()));
+      const formRef=React.useRef(null);
+
+      // The selected time window. `targets` = compare against weekly Area targets
+      // (only meaningful for week-length ranges); otherwise bars show share of total.
+      const period=React.useMemo(()=>{
+        const now=new Date();
+        if(range==='lastweek'){ const s=addDays(startOfWeek(now),-7); return {from:s,to:addDays(s,7),label:'Last week',targets:true}; }
+        if(range==='month'){ return {from:startOfMonth(now),to:new Date(now.getFullYear(),now.getMonth()+1,1),label:'This month',targets:false}; }
+        if(range==='30d'){ return {from:addDays(now,-30),to:now,label:'Last 30 days',targets:false}; }
+        if(range==='custom'){ return {from:new Date(`${customFrom}T00:00:00`),to:new Date(`${customTo}T23:59:59`),label:'Custom range',targets:false}; }
+        const r=weekRange(now); return {from:r.from,to:r.to,label:'This week',targets:true};
+      },[range,customFrom,customTo]);
 
       async function loadAll() {
         try {
-          const { from, to } = weekRange(new Date());
           const now=new Date();
-          const statsTo = to>now?now:to; // count elapsed time this week, not future plans
+          const from=period.from;
+          const to=period.to>now?now:period.to; // count elapsed time only, not future plans
           const cats=await api('/categories'); setAreas(cats||[]);
           const catById={}; (cats||[]).forEach(c=>{ catById[c.id]=c; });
-          // Recent logged sessions = non all-day events over the last 30 days, up to now.
-          const since=addDays(now,-30);
-          const evs=await api(`/events?from=${encodeURIComponent(since.toISOString())}&to=${encodeURIComponent(now.toISOString())}`)||[];
+          // Logged sessions = non all-day events within the selected window, up to now.
+          const evs=await api(`/events?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`)||[];
           setLogs(evs.filter(e=>!e.all_day).map(e=>eventToLog(e,catById)));
-          const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(statsTo.toISOString())}`); setStats(s||null);
+          const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`); setStats(s||null);
         } catch(ex){ setErr(ex.message); }
       }
-      React.useEffect(()=>{ loadAll(); },[]);
+      React.useEffect(()=>{ loadAll(); },[period]);
 
       const set=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
 
@@ -935,6 +1128,9 @@
         setForm({ area_id:l.area_id||'', sub_activity:l.sub_activity||'',
           hours:String(Math.floor(l.duration_minutes/60)), minutes:String(l.duration_minutes%60),
           date:ymd(new Date(l.logged_at)), notes:l.notes||'' });
+        // The edit form lives at the top of the panel; bring it into view so the
+        // click has a visible effect when the edited entry is scrolled below it.
+        formRef.current?.scrollIntoView({behavior:'smooth',block:'start'});
       }
       async function del(id) {
         if(!confirm('Delete this entry?')) return;
@@ -953,10 +1149,14 @@
           <TopBar title="Time Log" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}/>
           <div style={{flex:1,overflow:'auto',background:'var(--bg-subtle)'}}>
             <div style={{maxWidth:860,margin:'0 auto',padding:'24px 20px 60px'}}>
-              <form onSubmit={submit} style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18,marginBottom:24}}>
+              <form ref={formRef} onSubmit={submit} style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18,marginBottom:24}}>
                 <div style={{fontSize:14,fontWeight:600,marginBottom:14}}>{editing?'Edit entry':'Log time'}</div>
                 <div style={{display:'grid',gridTemplateColumns:'1.3fr 1.3fr 0.7fr 0.7fr 1.1fr',gap:10,alignItems:'end'}}>
-                  <div><label style={S.label}>Area</label>
+                  <div>
+                    <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
+                      <label style={S.label}>Area</label>
+                      <button type="button" onClick={()=>setNewArea(true)} style={{...S.iconBtn,fontSize:12,padding:'0 2px',color:'var(--accent)',fontWeight:600}}>+ New</button>
+                    </div>
                     <select style={S.input} value={form.area_id} onChange={set('area_id')}>
                       <option value="">No area</option>
                       {areas.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
@@ -974,10 +1174,28 @@
                 </div>
               </form>
 
-              <StatsPanel stats={stats}/>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,flexWrap:'wrap'}}>
+                <div style={{display:'flex',background:'#fff',border:'1px solid var(--border)',borderRadius:8,padding:2,gap:1}}>
+                  {[['week','This week'],['lastweek','Last week'],['month','This month'],['30d','30 days'],['custom','Custom']].map(([k,label])=>(
+                    <button key={k} onClick={()=>setRange(k)} style={{
+                      padding:'5px 12px',borderRadius:6,border:'none',cursor:'pointer',fontSize:13,fontWeight:500,
+                      background:range===k?'var(--accent)':'transparent',
+                      color:range===k?'#fff':'var(--text-muted)',transition:'0.1s'}}>{label}</button>
+                  ))}
+                </div>
+                {range==='custom'&&(
+                  <div style={{display:'flex',alignItems:'center',gap:6}}>
+                    <input type="date" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customFrom} max={customTo} onChange={e=>setCustomFrom(e.target.value)}/>
+                    <span style={{color:'var(--text-muted)',fontSize:13}}>→</span>
+                    <input type="date" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customTo} min={customFrom} onChange={e=>setCustomTo(e.target.value)}/>
+                  </div>
+                )}
+              </div>
+
+              <StatsPanel stats={stats} label={period.label} showTargets={period.targets}/>
 
               <div style={{marginTop:24}}>
-                <div style={{fontSize:13,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:10}}>Recent entries</div>
+                <div style={{fontSize:13,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:10}}>Entries</div>
                 {grouped.length===0&&<div style={{color:'var(--text-muted)',fontSize:14,padding:'20px 0'}}>No entries yet — log your first session above.</div>}
                 {grouped.map(([day,items])=>{
                   const total=items.reduce((s,l)=>s+l.duration_minutes,0);
@@ -1009,6 +1227,8 @@
               </div>
             </div>
           </div>
+          {newArea&&<AreaModal onClose={()=>setNewArea(false)}
+            onSaved={cat=>{ setAreas(as=>[...as,cat]); setForm(f=>({...f,area_id:cat.id})); setNewArea(false); }}/>}
         </div>
       );
     }
@@ -1031,13 +1251,15 @@
       );
     }
 
-    function AreaCard({ area, tasks, weekMins, onToggle, onAdd, onDel, onEdit }) {
+    function AreaCard({ area, tasks, weekMins, plannedMins=0, onToggle, onAdd, onDel, onEdit }) {
       const [newTitle,setNewTitle]=React.useState('');
       const [showDone,setShowDone]=React.useState(false);
       const open=tasks.filter(t=>!t.done);
       const done=tasks.filter(t=>t.done);
       const tgt=area.weekly_target_minutes||0;
-      const pct=tgt>0?Math.min(100,Math.round(weekMins/tgt*100)):0;
+      const donePct=tgt>0?Math.min(100,weekMins/tgt*100):0;
+      const planPct=tgt>0?Math.min(100-donePct,plannedMins/tgt*100):0;
+      const projected=weekMins+plannedMins;
       return (
         <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:16,display:'flex',flexDirection:'column'}}>
           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
@@ -1045,14 +1267,23 @@
             <div style={{fontSize:15,fontWeight:600,flex:1}}>{area.name}</div>
             {onEdit&&<button style={S.iconBtn} title="Edit area" onClick={onEdit}>✎</button>}
           </div>
-          {tgt>0&&(
+          {(tgt>0||weekMins>0||plannedMins>0)&&(
             <div style={{marginBottom:12}}>
               <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'var(--text-muted)',marginBottom:4}}>
-                <span>This week</span><span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(weekMins)} / {fmtMins(tgt)}</span>
+                <span>This week</span><span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(weekMins)}{tgt>0?` / ${fmtMins(tgt)}`:''}</span>
               </div>
-              <div style={{height:6,borderRadius:3,background:'var(--bg-subtle)',overflow:'hidden'}}>
-                <div style={{height:'100%',width:`${pct}%`,background:area.color||'var(--accent)',borderRadius:3,transition:'0.2s'}}/>
-              </div>
+              {tgt>0&&(
+                <div style={{display:'flex',height:6,borderRadius:3,background:'var(--bg-subtle)',overflow:'hidden'}}>
+                  <div style={{width:`${donePct}%`,background:area.color||'var(--accent)',transition:'0.2s'}} title={`Logged ${fmtMins(weekMins)}`}/>
+                  {planPct>0&&<div style={{width:`${planPct}%`,background:area.color||'var(--accent)',opacity:0.4,transition:'0.2s'}} title={`Planned ${fmtMins(plannedMins)}`}/>}
+                </div>
+              )}
+              {plannedMins>0&&(
+                <div style={{fontSize:11,color:'var(--text-muted)',marginTop:5,display:'flex',alignItems:'center',gap:5}}>
+                  <span style={{width:8,height:8,borderRadius:2,background:area.color||'var(--accent)',opacity:0.4,flexShrink:0}}/>
+                  <span>{fmtMins(plannedMins)} planned{tgt>0?(projected<tgt?` · ${fmtMins(tgt-projected)} to target`:' · on track'):''}</span>
+                </div>
+              )}
             </div>
           )}
           <div style={{display:'flex',flexDirection:'column',gap:2}}>
@@ -1077,7 +1308,7 @@
       );
     }
 
-    function AreaModal({ area, onClose, onSaved }) {
+    function AreaModal({ area, onClose, onSaved, onDeleted }) {
       const isEdit=!!area;
       const [name,setName]=React.useState(area?.name||'');
       const [color,setColor]=React.useState(area?.color||CALENDAR_COLORS[0]);
@@ -1091,10 +1322,18 @@
         try {
           const weekly=Math.round(parseFloat(hours||'0')*60);
           const body={ name:name.trim(), color, weekly_target_minutes:weekly };
-          if(isEdit) await api(`/categories/${area.id}`,{method:'PUT',body:JSON.stringify(body)});
-          else       await api('/categories',{method:'POST',body:JSON.stringify(body)});
-          onSaved();
+          const saved = isEdit
+            ? await api(`/categories/${area.id}`,{method:'PUT',body:JSON.stringify(body)})
+            : await api('/categories',{method:'POST',body:JSON.stringify(body)});
+          onSaved(saved);
         } catch(ex){ setErr(ex.message); setBusy(false); }
+      }
+
+      async function del() {
+        if(!confirm('Delete this area? Events and tasks keep their data and become uncategorized.')) return;
+        setBusy(true); setErr('');
+        try{ await api(`/categories/${area.id}`,{method:'DELETE'}); onDeleted&&onDeleted(area.id); }
+        catch(ex){ setErr(ex.message); setBusy(false); }
       }
 
       return (
@@ -1116,7 +1355,8 @@
               </div>
               <div style={{marginBottom:20}}><label style={S.label}>Weekly target (hours)</label><input style={S.input} type="number" min="0" step="0.5" value={hours} onChange={e=>setHours(e.target.value)} placeholder="0 = no target"/></div>
               {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
-              <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap'}}>
+                {isEdit&&onDeleted&&<button type="button" onClick={del} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>Delete</button>}
                 <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
                 <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':(isEdit?'Save':'Create')}</button>
               </div>
@@ -1130,17 +1370,26 @@
       const [areas,setAreas]=React.useState([]);
       const [tasks,setTasks]=React.useState([]);
       const [weekMins,setWeekMins]=React.useState({});
+      const [plannedMins,setPlannedMins]=React.useState({});
       const [editing,setEditing]=React.useState(null); // 'new' | area | null
       const [err,setErr]=React.useState('');
 
       async function loadAll() {
         try {
           const { from, to } = weekRange(new Date());
-          const now=new Date(); const statsTo = to>now?now:to; // elapsed time so far this week
+          const now=new Date();
+          const statsTo = to>now?now:to;      // elapsed portion of the week
+          const planFrom = now>from?now:from;  // remaining portion of the week
           const cats=await api('/categories'); setAreas(cats||[]);
           const t=await api('/tasks'); setTasks(t||[]);
           const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(statsTo.toISOString())}`);
           const m={}; (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; }); setWeekMins(m);
+          const pm={};
+          if(to>planFrom){
+            const sp=await api(`/events/stats?from=${encodeURIComponent(planFrom.toISOString())}&to=${encodeURIComponent(to.toISOString())}`);
+            (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
+          }
+          setPlannedMins(pm);
         } catch(ex){ setErr(ex.message); }
       }
       React.useEffect(()=>{ loadAll(); },[]);
@@ -1165,18 +1414,20 @@
               {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:18,alignItems:'start'}}>
                 {areas.map(a=>(
-                  <AreaCard key={a.id} area={a} tasks={tasksByArea[a.id]||[]} weekMins={weekMins[a.id]||0}
+                  <AreaCard key={a.id} area={a} tasks={tasksByArea[a.id]||[]} weekMins={weekMins[a.id]||0} plannedMins={plannedMins[a.id]||0}
                     onToggle={toggleTask} onAdd={addTask} onDel={delTask} onEdit={()=>setEditing(a)}/>
                 ))}
                 {(tasksByArea['none']||[]).length>0&&(
-                  <AreaCard area={{id:null,name:'No area',color:'#cbd5e1',weekly_target_minutes:0}} tasks={tasksByArea['none']} weekMins={0}
+                  <AreaCard area={{id:null,name:'No area',color:'#cbd5e1',weekly_target_minutes:0}} tasks={tasksByArea['none']} weekMins={0} plannedMins={0}
                     onToggle={toggleTask} onAdd={addTask} onDel={delTask}/>
                 )}
               </div>
               {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14,marginTop:20}}>No areas yet. Create one to start tracking goals and tasks.</div>}
             </div>
           </div>
-          {editing&&<AreaModal area={editing==='new'?null:editing} onClose={()=>setEditing(null)} onSaved={async()=>{ setEditing(null); await loadAll(); }}/>}
+          {editing&&<AreaModal area={editing==='new'?null:editing} onClose={()=>setEditing(null)}
+            onSaved={async()=>{ setEditing(null); await loadAll(); }}
+            onDeleted={async()=>{ setEditing(null); await loadAll(); }}/>}
         </div>
       );
     }

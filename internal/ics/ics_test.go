@@ -62,9 +62,12 @@ func TestExport_AllDayEvent(t *testing.T) {
 	}
 	out := ics.Export("", []model.Event{e}, nil)
 
-	// All-day events use DATE format (no time component)
-	assert.Contains(t, out, "20240315")
-	assert.NotContains(t, out, "20240315T")
+	// All-day events use DATE format (no time component) on DTSTART/DTEND.
+	// (A blanket NotContains "20240315T" would wrongly trip on the DTSTAMP/
+	// LAST-MODIFIED lines, which legitimately carry a time-of-day.)
+	assert.Contains(t, out, "DTSTART;VALUE=DATE:20240315")
+	assert.Contains(t, out, "DTEND;VALUE=DATE:20240316")
+	assert.NotContains(t, out, "DTSTART;VALUE=DATE:20240315T")
 }
 
 func TestExport_RecurringEventEmitsRrule(t *testing.T) {

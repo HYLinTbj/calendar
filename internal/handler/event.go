@@ -20,11 +20,12 @@ type EventHandler struct {
 	shareRepo     *repository.CalendarShareRepository
 	inviteRepo    *repository.InvitationRepository
 	recurringRepo *repository.RecurringEventRepository
+	catRepo       *repository.CategoryRepository
 	queue         *queue.ReminderQueue
 }
 
-func NewEventHandler(repo *repository.EventRepository, calRepo *repository.CalendarRepository, shareRepo *repository.CalendarShareRepository, inviteRepo *repository.InvitationRepository, recurringRepo *repository.RecurringEventRepository, q *queue.ReminderQueue) *EventHandler {
-	return &EventHandler{repo: repo, calRepo: calRepo, shareRepo: shareRepo, inviteRepo: inviteRepo, recurringRepo: recurringRepo, queue: q}
+func NewEventHandler(repo *repository.EventRepository, calRepo *repository.CalendarRepository, shareRepo *repository.CalendarShareRepository, inviteRepo *repository.InvitationRepository, recurringRepo *repository.RecurringEventRepository, catRepo *repository.CategoryRepository, q *queue.ReminderQueue) *EventHandler {
+	return &EventHandler{repo: repo, calRepo: calRepo, shareRepo: shareRepo, inviteRepo: inviteRepo, recurringRepo: recurringRepo, catRepo: catRepo, queue: q}
 }
 
 func (h *EventHandler) Create(c *gin.Context) {
@@ -36,6 +37,9 @@ func (h *EventHandler) Create(c *gin.Context) {
 	}
 	calendarID, ok := h.resolveCalendar(c, ownerID, req.CalendarID)
 	if !ok {
+		return
+	}
+	if !h.validateCategory(c, ownerID, req.CategoryID) {
 		return
 	}
 	event, err := h.repo.Create(c.Request.Context(), ownerID, calendarID, req)
@@ -163,6 +167,9 @@ func (h *EventHandler) Update(c *gin.Context) {
 			return
 		}
 	}
+	if req.CategoryID.Set && !h.validateCategory(c, ownerID, req.CategoryID.Value) {
+		return
+	}
 	if err := h.queue.Cancel(c.Request.Context(), id); err != nil {
 		log.Printf("cancel reminder %s: %v", id, err)
 	}
@@ -235,6 +242,12 @@ func (h *EventHandler) resolveCalendar(c *gin.Context, ownerID uuid.UUID, reques
 	return def.ID, true
 }
 
+// validateCategory checks that a requested category exists and belongs to the caller.
+// nil (no category / clear) is always valid. Writes the error response on failure.
+func (h *EventHandler) validateCategory(c *gin.Context, ownerID uuid.UUID, categoryID *uuid.UUID) bool {
+	return validateCategoryOwnership(c, h.catRepo, ownerID, categoryID, "category not found")
+}
+
 // UpdateRecurrence handles PUT /events/:id/recurrence.
 // scope "this": detach instance, apply changes to just that event.
 // scope "this_and_following": truncate series at pivot, create new series with changes.
@@ -249,6 +262,9 @@ func (h *EventHandler) UpdateRecurrence(c *gin.Context) {
 	var req model.UpdateRecurrenceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !h.validateCategory(c, ownerID, req.CategoryID) {
 		return
 	}
 

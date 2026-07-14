@@ -13,11 +13,12 @@ import (
 )
 
 type TaskHandler struct {
-	repo *repository.TaskRepository
+	repo    *repository.TaskRepository
+	catRepo *repository.CategoryRepository
 }
 
-func NewTaskHandler(repo *repository.TaskRepository) *TaskHandler {
-	return &TaskHandler{repo: repo}
+func NewTaskHandler(repo *repository.TaskRepository, catRepo *repository.CategoryRepository) *TaskHandler {
+	return &TaskHandler{repo: repo, catRepo: catRepo}
 }
 
 func (h *TaskHandler) Create(c *gin.Context) {
@@ -25,6 +26,9 @@ func (h *TaskHandler) Create(c *gin.Context) {
 	var req model.CreateTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validateCategoryOwnership(c, h.catRepo, ownerID, req.AreaID, "area not found") {
 		return
 	}
 	task, err := h.repo.Create(c.Request.Context(), ownerID, req)
@@ -95,6 +99,11 @@ func (h *TaskHandler) Update(c *gin.Context) {
 	var req model.UpdateTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// AreaID is Optional: an absent field keeps the current area (skip), an explicit
+	// null clears it (nil is valid), and a concrete id must exist and be owned.
+	if req.AreaID.Set && !validateCategoryOwnership(c, h.catRepo, ownerID, req.AreaID.Value, "area not found") {
 		return
 	}
 	task, err := h.repo.Update(c.Request.Context(), id, ownerID, req)

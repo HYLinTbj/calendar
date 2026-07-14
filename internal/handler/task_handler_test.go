@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,6 +86,34 @@ func TestTask_RequiresTitle(t *testing.T) {
 
 	w := Do(t, testRouter, "POST", "/tasks", token, map[string]any{"notes": "no title"})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestTask_AreaValidated(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "th_area")
+	_, otherToken := MustRegisterAndLogin(t, testRouter, "th_area_other")
+	foreignArea := createCategory(t, otherToken, "Theirs", 0)
+
+	// Nonexistent area → 400, not an FK 500.
+	w := Do(t, testRouter, "POST", "/tasks", token, map[string]any{
+		"title": "orphan", "area_id": uuid.New(),
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	// Another tenant's area → 400.
+	w = Do(t, testRouter, "POST", "/tasks", token, map[string]any{
+		"title": "intruder", "area_id": foreignArea,
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	// A no-area task can't be reassigned to a foreign area on update.
+	w = Do(t, testRouter, "POST", "/tasks", token, map[string]any{"title": "mine"})
+	require.Equal(t, http.StatusCreated, w.Code)
+	var task model.Task
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&task))
+
+	w = Do(t, testRouter, "PUT", "/tasks/"+task.ID.String(), token, map[string]any{"area_id": foreignArea})
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 }
 
 func TestTask_DeleteAndRequireAuth(t *testing.T) {

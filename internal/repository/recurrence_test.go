@@ -126,7 +126,7 @@ func TestNextOccurrences(t *testing.T) {
 			from:  time.Date(2024, 1, 31, 10, 0, 0, 0, time.UTC),
 			until: time.Date(2024, 3, 31, 10, 0, 0, 0, time.UTC),
 			want: []time.Time{
-				// 2024 is a leap year: Jan 31 +1 month = Feb 29 (Go's AddDate behavior)
+				// monthly-on-31 clamps to each month's last day: Feb 29 (leap year), then back to Mar 31
 				time.Date(2024, 2, 29, 10, 0, 0, 0, time.UTC),
 				time.Date(2024, 3, 31, 10, 0, 0, 0, time.UTC),
 			},
@@ -142,7 +142,7 @@ func TestNextOccurrences(t *testing.T) {
 			from:  time.Date(2024, 2, 29, 10, 0, 0, 0, time.UTC),
 			until: time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC),
 			want: []time.Time{
-				// AddDate(1,0,0) from Feb 29, 2024 → Feb 28, 2025 (Go normalizes)
+				// yearly from Feb 29 clamps to Feb 28 in non-leap years (returns to Feb 29 in leap years)
 				time.Date(2025, 2, 28, 10, 0, 0, 0, time.UTC),
 			},
 		},
