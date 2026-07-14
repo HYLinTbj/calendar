@@ -513,11 +513,16 @@
           cur={...base,dayIndex,startMin,moved:true};
           setDrag(cur);
         };
-        const up=()=>{
+        // finish tears down listeners and restores body styles. The browser can end
+        // a drag with pointercancel (touch gesture takeover, focus loss, pen leaving
+        // range) and never fire pointerup, so we listen for both; a cancelled drag
+        // discards the drop and just drops the preview.
+        const finish=cancelled=>{
           window.removeEventListener('pointermove',move);
           window.removeEventListener('pointerup',up);
+          window.removeEventListener('pointercancel',cancel);
           document.body.style.cursor=''; document.body.style.userSelect='';
-          if(cur.moved){
+          if(!cancelled && cur.moved){
             suppressClick.current=Date.now();
             const day=days[cur.dayIndex];
             const ns=new Date(day); ns.setHours(0,0,0,0); ns.setMinutes(cur.startMin);
@@ -525,8 +530,11 @@
           }
           setDrag(null);
         };
+        const up=()=>finish(false);
+        const cancel=()=>finish(true);
         window.addEventListener('pointermove',move);
         window.addEventListener('pointerup',up);
+        window.addEventListener('pointercancel',cancel);
       }
 
       return (
@@ -569,7 +577,7 @@
                   <div key={di} style={{flex:1,position:'relative',borderLeft:'1px solid var(--border)'}}>
                     {HOURS.map(h=>(
                       <div key={h} style={{position:'absolute',top:h*HOUR_H,left:0,right:0,height:HOUR_H,borderTop:'1px solid var(--border)',cursor:'pointer'}}
-                           onClick={()=>{ const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
+                           onClick={()=>{ if(Date.now()-suppressClick.current<300) return; const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
                     ))}
                     {(()=>{
                       const timed=dayEvts.filter(e=>!e.all_day);
@@ -877,12 +885,16 @@
       async function eventMoved(evt, start, end){
         const startISO=start.toISOString(), endISO=end.toISOString();
         if(evt.start_time===startISO && evt.end_time===endISO) return;
-        const prev=events;
         setEvts(es=>es.map(e=>e.id===evt.id?{...e,start_time:startISO,end_time:endISO}:e));
         try{
           const saved=await api(`/events/${evt.id}`,{method:'PUT',body:JSON.stringify({start_time:startISO,end_time:endISO})});
           setEvts(es=>es.map(e=>e.id===saved.id?saved:e));
-        }catch(ex){ setEvts(prev); alert('Could not move event: '+ex.message); }
+        }catch(ex){
+          // Roll back just this event's times so a concurrent change elsewhere
+          // (another drag, a modal save) isn't reverted along with it.
+          setEvts(es=>es.map(e=>e.id===evt.id?{...e,start_time:evt.start_time,end_time:evt.end_time}:e));
+          alert('Could not move event: '+ex.message);
+        }
       }
       function calCreated(c){ setCals(cs=>[...cs,c]); setSel(s=>new Set([...s,c.id])); setNewCal(false); }
       function catSaved(cat){ setCats(cs=>{ const i=cs.findIndex(c=>c.id===cat.id); return i>=0?[...cs.slice(0,i),cat,...cs.slice(i+1)]:[...cs,cat]; }); }

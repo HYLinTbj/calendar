@@ -481,3 +481,50 @@ func TestEventHandler_Category_InvalidRejected(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, wUpd.Code, wUpd.Body.String())
 }
+
+func TestRecurringEventHandler_CategoryValidated(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "rec_cat")
+	_, otherToken := MustRegisterAndLogin(t, testRouter, "rec_cat_other")
+	ownCat := createCategory(t, token, "Study", 0)
+	foreignCat := createCategory(t, otherToken, "Theirs", 0)
+
+	base := map[string]interface{}{
+		"title":      "Weekly Sync",
+		"start_time": "2024-01-01T09:00:00Z",
+		"end_time":   "2024-01-01T10:00:00Z",
+		"frequency":  "weekly",
+		"interval":   1,
+	}
+	with := func(catID interface{}) map[string]interface{} {
+		m := map[string]interface{}{}
+		for k, v := range base {
+			m[k] = v
+		}
+		m["category_id"] = catID
+		return m
+	}
+
+	// An owned category is accepted.
+	wOK := Do(t, testRouter, "POST", "/recurring-events", token, with(ownCat))
+	require.Equal(t, http.StatusCreated, wOK.Code, wOK.Body.String())
+	var rec struct {
+		ID uuid.UUID `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(wOK.Body).Decode(&rec))
+
+	// Nonexistent category → 400, not an FK 500 (which would also leak into every
+	// materialized instance).
+	wBad := Do(t, testRouter, "POST", "/recurring-events", token, with(uuid.New()))
+	assert.Equal(t, http.StatusBadRequest, wBad.Code, wBad.Body.String())
+
+	// Another tenant's category → 400.
+	wForeign := Do(t, testRouter, "POST", "/recurring-events", token, with(foreignCat))
+	assert.Equal(t, http.StatusBadRequest, wForeign.Code, wForeign.Body.String())
+
+	// Same rejection on update.
+	wUpd := Do(t, testRouter, "PUT", fmt.Sprintf("/recurring-events/%s", rec.ID), token, map[string]interface{}{
+		"category_id": foreignCat,
+	})
+	assert.Equal(t, http.StatusBadRequest, wUpd.Code, wUpd.Body.String())
+}

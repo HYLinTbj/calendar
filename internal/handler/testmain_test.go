@@ -92,10 +92,10 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 	calHandler := handler.NewCalendarHandler(calRepo)
 	shareHandler := handler.NewCalendarShareHandler(shareRepo, calRepo, userRepo)
 	eventHandler := handler.NewEventHandler(eventRepo, calRepo, shareRepo, inviteRepo, recurringRepo, categoryRepo, reminderQueue)
-	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo)
+	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo, categoryRepo)
 	inviteHandler := handler.NewInvitationHandler(inviteRepo)
 	categoryHandler := handler.NewCategoryHandler(categoryRepo)
-	taskHandler := handler.NewTaskHandler(repository.NewTaskRepository(pool))
+	taskHandler := handler.NewTaskHandler(repository.NewTaskRepository(pool), categoryRepo)
 	icsHandler := handler.NewICSHandler(calRepo, eventRepo, recurringRepo, inviteRepo)
 	freeBusyHandler := handler.NewFreeBusyHandler(eventRepo, userRepo)
 

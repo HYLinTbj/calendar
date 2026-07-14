@@ -50,10 +50,10 @@ func main() {
 	calHandler := handler.NewCalendarHandler(calRepo)
 	shareHandler := handler.NewCalendarShareHandler(shareRepo, calRepo, userRepo)
 	eventHandler := handler.NewEventHandler(eventRepo, calRepo, shareRepo, inviteRepo, recurringRepo, categoryRepo, reminderQueue)
-	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo)
+	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo, categoryRepo)
 	inviteHandler := handler.NewInvitationHandler(inviteRepo)
 	categoryHandler := handler.NewCategoryHandler(categoryRepo)
-	taskHandler := handler.NewTaskHandler(taskRepo)
+	taskHandler := handler.NewTaskHandler(taskRepo, categoryRepo)
 	icsHandler := handler.NewICSHandler(calRepo, eventRepo, recurringRepo, inviteRepo)
 	freeBusyHandler := handler.NewFreeBusyHandler(eventRepo, userRepo)
 

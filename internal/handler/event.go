@@ -245,19 +245,7 @@ func (h *EventHandler) resolveCalendar(c *gin.Context, ownerID uuid.UUID, reques
 // validateCategory checks that a requested category exists and belongs to the caller.
 // nil (no category / clear) is always valid. Writes the error response on failure.
 func (h *EventHandler) validateCategory(c *gin.Context, ownerID uuid.UUID, categoryID *uuid.UUID) bool {
-	if categoryID == nil {
-		return true
-	}
-	_, err := h.catRepo.GetByID(c.Request.Context(), *categoryID, ownerID)
-	if err == pgx.ErrNoRows {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "category not found"})
-		return false
-	}
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return false
-	}
-	return true
+	return validateCategoryOwnership(c, h.catRepo, ownerID, categoryID, "category not found")
 }
 
 // UpdateRecurrence handles PUT /events/:id/recurrence.

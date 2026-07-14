@@ -14,10 +14,11 @@ import (
 type RecurringEventHandler struct {
 	repo    *repository.RecurringEventRepository
 	calRepo *repository.CalendarRepository
+	catRepo *repository.CategoryRepository
 }
 
-func NewRecurringEventHandler(repo *repository.RecurringEventRepository, calRepo *repository.CalendarRepository) *RecurringEventHandler {
-	return &RecurringEventHandler{repo: repo, calRepo: calRepo}
+func NewRecurringEventHandler(repo *repository.RecurringEventRepository, calRepo *repository.CalendarRepository, catRepo *repository.CategoryRepository) *RecurringEventHandler {
+	return &RecurringEventHandler{repo: repo, calRepo: calRepo, catRepo: catRepo}
 }
 
 func (h *RecurringEventHandler) Create(c *gin.Context) {
@@ -33,6 +34,9 @@ func (h *RecurringEventHandler) Create(c *gin.Context) {
 	}
 	calendarID, ok := h.resolveCalendar(c, ownerID, req.CalendarID)
 	if !ok {
+		return
+	}
+	if !validateCategoryOwnership(c, h.catRepo, ownerID, req.CategoryID, "category not found") {
 		return
 	}
 	rec, err := h.repo.Create(c.Request.Context(), ownerID, calendarID, req)
@@ -92,6 +96,11 @@ func (h *RecurringEventHandler) Update(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+	}
+	// nil means "keep the current category" here (matching the repository), so an
+	// unset field skips validation.
+	if !validateCategoryOwnership(c, h.catRepo, ownerID, req.CategoryID, "category not found") {
+		return
 	}
 	rec, err := h.repo.Update(c.Request.Context(), id, ownerID, req)
 	if err == pgx.ErrNoRows {
