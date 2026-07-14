@@ -307,12 +307,12 @@ func (r *RecurringEventRepository) SplitAt(ctx context.Context, recurringEventID
 		Attendees:   newAttendees,
 		Reminders:   newReminders,
 		Frequency:   parent.Frequency,
-		Interval:        parent.Interval,
-		DaysOfWeek:      parent.DaysOfWeek,
-		EndDate:         parent.EndDate,
-		AllDay:          newAllDay,
-		Timezone:        newTZ,
-		CategoryID:      newCategory,
+		Interval:    parent.Interval,
+		DaysOfWeek:  parent.DaysOfWeek,
+		EndDate:     parent.EndDate,
+		AllDay:      newAllDay,
+		Timezone:    newTZ,
+		CategoryID:  newCategory,
 	}
 
 	return r.Create(ctx, parent.OwnerID, parent.CalendarID, createReq)
@@ -468,12 +468,23 @@ func nextOccurrences(rec *model.RecurringEvent, from, until time.Time) []time.Ti
 }
 
 // step advances t by one recurrence interval, reconstructing the wall-clock time
-// in loc so that DST transitions don't shift the displayed hour.
+// in loc so that DST transitions don't shift the displayed hour. Weekly steps with
+// explicit days honor Interval by skipping whole weeks (WKST = Monday). Monthly and
+// yearly steps anchor on StartTime's day-of-month and clamp to the last valid day of
+// the target month, so e.g. monthly-on-31 lands on Feb 29 (and Feb 29 yearly → Feb 28).
 func step(rec *model.RecurringEvent, t time.Time, loc *time.Location, h, m, s, ns int) time.Time {
 	local := t.In(loc)
 	n := rec.Interval
 	rebuild := func(d time.Time) time.Time {
 		return time.Date(d.Year(), d.Month(), d.Day(), h, m, s, ns, loc).UTC()
+	}
+	matches := func(d time.Time) bool {
+		for _, wd := range rec.DaysOfWeek {
+			if int(d.Weekday()) == wd {
+				return true
+			}
+		}
+		return false
 	}
 	switch rec.Frequency {
 	case "daily":
@@ -482,23 +493,43 @@ func step(rec *model.RecurringEvent, t time.Time, loc *time.Location, h, m, s, n
 		if len(rec.DaysOfWeek) == 0 {
 			return rebuild(local.AddDate(0, 0, 7*n))
 		}
-		candidate := local.AddDate(0, 0, 1)
-		limit := local.AddDate(0, 0, 7*n)
-		for !candidate.After(limit) {
-			for _, d := range rec.DaysOfWeek {
-				if int(candidate.Weekday()) == d {
-					return rebuild(candidate)
-				}
+		// A later matching day in the current week (WKST = Monday) comes first.
+		isoDow := (int(local.Weekday()) + 6) % 7 // Mon=0 … Sun=6
+		for off := 1; off <= 6-isoDow; off++ {
+			if c := local.AddDate(0, 0, off); matches(c) {
+				return rebuild(c)
 			}
-			candidate = candidate.AddDate(0, 0, 1)
 		}
-		return rebuild(limit)
+		// Otherwise skip Interval whole weeks and take the first matching day.
+		nextWeek := local.AddDate(0, 0, -isoDow+7*n)
+		for off := 0; off <= 6; off++ {
+			if c := nextWeek.AddDate(0, 0, off); matches(c) {
+				return rebuild(c)
+			}
+		}
+		return rebuild(nextWeek)
 	case "monthly":
-		return rebuild(local.AddDate(0, n, 0))
+		anchor := rec.StartTime.In(loc)
+		total := int(local.Month()) - 1 + n
+		return clampDate(local.Year()+total/12, time.Month(total%12+1), anchor.Day(), h, m, s, ns, loc)
 	case "yearly":
-		return rebuild(local.AddDate(n, 0, 0))
+		anchor := rec.StartTime.In(loc)
+		return clampDate(local.Year()+n, anchor.Month(), anchor.Day(), h, m, s, ns, loc)
 	default:
 		return rebuild(local.AddDate(0, 0, 1))
 	}
 }
 
+// clampDate builds a UTC instant for year/month/day at the given wall-clock time in
+// loc, clamping day down to the month's last day when it overflows (e.g. Feb 31 → 29).
+func clampDate(year int, month time.Month, day, h, m, s, ns int, loc *time.Location) time.Time {
+	if last := daysInMonth(year, month); day > last {
+		day = last
+	}
+	return time.Date(year, month, day, h, m, s, ns, loc).UTC()
+}
+
+// daysInMonth returns the number of days in month (day 0 of the following month).
+func daysInMonth(year int, month time.Month) int {
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
