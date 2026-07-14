@@ -49,7 +49,7 @@ func main() {
 	userHandler := handler.NewUserHandler(userRepo)
 	calHandler := handler.NewCalendarHandler(calRepo)
 	shareHandler := handler.NewCalendarShareHandler(shareRepo, calRepo, userRepo)
-	eventHandler := handler.NewEventHandler(eventRepo, calRepo, shareRepo, inviteRepo, recurringRepo, reminderQueue)
+	eventHandler := handler.NewEventHandler(eventRepo, calRepo, shareRepo, inviteRepo, recurringRepo, categoryRepo, reminderQueue)
 	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo)
 	inviteHandler := handler.NewInvitationHandler(inviteRepo)
 	categoryHandler := handler.NewCategoryHandler(categoryRepo)

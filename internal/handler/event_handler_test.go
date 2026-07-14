@@ -382,3 +382,102 @@ func TestEventHandler_UpdateRecurrence_ScopeThis_DetachesInstance(t *testing.T) 
 	assert.Equal(t, "One-off Sync", got.Title)
 	assert.Nil(t, got.RecurringEventID)
 }
+
+func TestEventHandler_CategoryAssociation(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_cat")
+	catID := createCategory(t, token, "French", 300)
+
+	// Create with an owned category.
+	w := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title":       "reading",
+		"start_time":  "2024-06-15T09:00:00Z",
+		"end_time":    "2024-06-15T09:45:00Z",
+		"category_id": catID,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var created struct {
+		ID         uuid.UUID  `json:"id"`
+		CategoryID *uuid.UUID `json:"category_id"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&created))
+	require.NotNil(t, created.CategoryID)
+	assert.Equal(t, catID, *created.CategoryID)
+
+	// Omitting category_id on update leaves it unchanged.
+	wUpd := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", created.ID), token, map[string]interface{}{
+		"title": "reading (edited)",
+	})
+	require.Equal(t, http.StatusOK, wUpd.Code, wUpd.Body.String())
+	var afterOmit struct {
+		CategoryID *uuid.UUID `json:"category_id"`
+	}
+	require.NoError(t, json.NewDecoder(wUpd.Body).Decode(&afterOmit))
+	require.NotNil(t, afterOmit.CategoryID)
+	assert.Equal(t, catID, *afterOmit.CategoryID)
+
+	// An explicit null clears it.
+	wClear := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", created.ID), token, map[string]interface{}{
+		"category_id": nil,
+	})
+	require.Equal(t, http.StatusOK, wClear.Code, wClear.Body.String())
+	var afterClear struct {
+		CategoryID *uuid.UUID `json:"category_id"`
+	}
+	require.NoError(t, json.NewDecoder(wClear.Body).Decode(&afterClear))
+	assert.Nil(t, afterClear.CategoryID)
+
+	// And it can be set again via update.
+	wSet := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", created.ID), token, map[string]interface{}{
+		"category_id": catID,
+	})
+	require.Equal(t, http.StatusOK, wSet.Code, wSet.Body.String())
+	var afterSet struct {
+		CategoryID *uuid.UUID `json:"category_id"`
+	}
+	require.NoError(t, json.NewDecoder(wSet.Body).Decode(&afterSet))
+	require.NotNil(t, afterSet.CategoryID)
+	assert.Equal(t, catID, *afterSet.CategoryID)
+}
+
+func TestEventHandler_Category_InvalidRejected(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_catbad")
+	_, otherToken := MustRegisterAndLogin(t, testRouter, "evh_catbad_other")
+	foreignCat := createCategory(t, otherToken, "Theirs", 0)
+
+	// Nonexistent category → 400, not an FK 500.
+	w := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title":       "x",
+		"start_time":  "2024-06-15T09:00:00Z",
+		"end_time":    "2024-06-15T10:00:00Z",
+		"category_id": uuid.New(),
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+	// Another user's category → 400.
+	w2 := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title":       "y",
+		"start_time":  "2024-06-15T09:00:00Z",
+		"end_time":    "2024-06-15T10:00:00Z",
+		"category_id": foreignCat,
+	})
+	assert.Equal(t, http.StatusBadRequest, w2.Code, w2.Body.String())
+
+	// Same rejection on update.
+	wEv := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title":      "z",
+		"start_time": "2024-06-15T09:00:00Z",
+		"end_time":   "2024-06-15T10:00:00Z",
+	})
+	require.Equal(t, http.StatusCreated, wEv.Code)
+	var ev struct {
+		ID uuid.UUID `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(wEv.Body).Decode(&ev))
+
+	wUpd := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", ev.ID), token, map[string]interface{}{
+		"category_id": foreignCat,
+	})
+	assert.Equal(t, http.StatusBadRequest, wUpd.Code, wUpd.Body.String())
+}
