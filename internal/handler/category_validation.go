@@ -5,8 +5,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/hylin/calendar/internal/model"
 	"github.com/hylin/calendar/internal/repository"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // validateCategoryOwnership checks that a requested category (a.k.a. Area) exists
@@ -30,4 +32,46 @@ func validateCategoryOwnership(c *gin.Context, catRepo *repository.CategoryRepos
 		return false
 	}
 	return true
+}
+
+// validateGroupOwnership is validateCategoryOwnership for an Area's group_id:
+// the FK alone would accept another tenant's group.
+func validateGroupOwnership(c *gin.Context, groupRepo *repository.CategoryGroupRepository, ownerID uuid.UUID, groupID *uuid.UUID) bool {
+	if groupID == nil {
+		return true
+	}
+	_, err := groupRepo.GetByID(c.Request.Context(), *groupID, ownerID)
+	if err == pgx.ErrNoRows {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "group not found"})
+		return false
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return false
+	}
+	return true
+}
+
+// normalizeCodeField validates an optional caller-supplied Area code in place.
+// An empty code on create means "derive one"; on update a present field must be
+// valid. On failure it writes a 400 and returns false.
+func normalizeCodeField(c *gin.Context, code *string, allowEmpty bool) bool {
+	if code == nil || (allowEmpty && *code == "") {
+		return true
+	}
+	norm, ok := model.NormalizeCategoryCode(*code)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code must be 1-4 letters or digits"})
+		return false
+	}
+	*code = norm
+	return true
+}
+
+// categoryConflictMessage names which per-owner uniqueness rule a 23505 hit.
+func categoryConflictMessage(err error) string {
+	if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.ConstraintName == "categories_owner_code_uniq" {
+		return "category code already exists"
+	}
+	return "category name already exists"
 }

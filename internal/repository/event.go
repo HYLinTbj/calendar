@@ -436,14 +436,17 @@ func (r *EventRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) err
 // one) collect under a single "Uncategorized" entry.
 func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to time.Time) (*model.TimeStats, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT e.category_id, COALESCE(c.name, ''), COALESCE(c.color, ''),
-		       COALESCE(c.weekly_target_minutes, 0), e.title,
+		SELECT e.category_id, COALESCE(c.name, ''), COALESCE(c.code, ''), COALESCE(c.color, ''),
+		       COALESCE(c.weekly_target_minutes, 0),
+		       c.group_id, COALESCE(g.name, ''), COALESCE(g.color, ''), e.title,
 		       SUM(EXTRACT(EPOCH FROM (e.end_time - e.start_time)) / 60)::int
 		FROM events e
 		LEFT JOIN categories c ON c.id = e.category_id
+		LEFT JOIN category_groups g ON g.id = c.group_id
 		WHERE e.owner_id = $1 AND e.all_day = false
 		  AND e.start_time >= $2 AND e.start_time < $3
-		GROUP BY e.category_id, c.name, c.color, c.weekly_target_minutes, e.title
+		GROUP BY e.category_id, c.name, c.code, c.color, c.weekly_target_minutes,
+		         c.group_id, g.name, g.color, e.title
 		ORDER BY c.name NULLS LAST, e.title`,
 		ownerID, from, to)
 	if err != nil {
@@ -454,10 +457,10 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 	stats := &model.TimeStats{From: from, To: to, Areas: []model.AreaStat{}}
 	pos := map[string]int{} // group key -> index into stats.Areas
 	for rows.Next() {
-		var areaID *uuid.UUID
-		var name, color, sub string
+		var areaID, groupID *uuid.UUID
+		var name, code, color, groupName, groupColor, sub string
 		var target, minutes int
-		if err := rows.Scan(&areaID, &name, &color, &target, &sub, &minutes); err != nil {
+		if err := rows.Scan(&areaID, &name, &code, &color, &target, &groupID, &groupName, &groupColor, &sub, &minutes); err != nil {
 			return nil, err
 		}
 		key := "none"
@@ -472,7 +475,11 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 			stats.Areas = append(stats.Areas, model.AreaStat{
 				AreaID:              areaID,
 				AreaName:            name,
+				AreaCode:            code,
 				AreaColor:           color,
+				GroupID:             groupID,
+				GroupName:           groupName,
+				GroupColor:          groupColor,
 				WeeklyTargetMinutes: target,
 				SubActivities:       []model.SubActivityStat{},
 			})

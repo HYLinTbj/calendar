@@ -17,11 +17,16 @@ type TimeStats struct {
 }
 
 // AreaStat is the per-Area rollup. AreaID is nil for events without a category,
-// which are grouped under a single "Uncategorized" entry.
+// which are grouped under a single "Uncategorized" entry. The Group* fields
+// describe the Area's category group, if any, so clients can subtotal by group.
 type AreaStat struct {
 	AreaID              *uuid.UUID        `json:"area_id,omitempty"`
 	AreaName            string            `json:"area_name"`
+	AreaCode            string            `json:"area_code,omitempty"`
 	AreaColor           string            `json:"area_color"`
+	GroupID             *uuid.UUID        `json:"group_id,omitempty"`
+	GroupName           string            `json:"group_name,omitempty"`
+	GroupColor          string            `json:"group_color,omitempty"`
 	WeeklyTargetMinutes int               `json:"weekly_target_minutes"`
 	TotalMinutes        int               `json:"total_minutes"`
 	SubActivities       []SubActivityStat `json:"sub_activities"`
