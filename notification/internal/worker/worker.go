@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
 	"github.com/hylin/calendar/internal/queue"
+	"github.com/hylin/calendar/internal/repository"
 	"github.com/hylin/calendar/notification/internal/mailer"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -80,7 +81,10 @@ const startedGrace = time.Minute
 func (w *Worker) handleReminder(ctx context.Context, member string) (relayDown bool) {
 	data, err := w.rdb.Get(ctx, "reminder:"+member).Result()
 	if err == redis.Nil {
-		w.rdb.ZRem(ctx, "reminders", member) // data gone (cancelled mid-poll): clear the entry
+		// Data gone (cancelled mid-poll): clear the entry, unless it's been scheduled again.
+		if err := w.queue.ClearOrphan(ctx, member); err != nil {
+			log.Printf("clear reminder %s: %v", member, err)
+		}
 		return false
 	}
 	if err != nil {
@@ -181,7 +185,9 @@ func (w *Worker) handleReminder(ctx context.Context, member string) (relayDown b
 // that invitation is retried with backoff (1, 4, 9, 16 minutes) and marked 'failed'
 // once it's rejected outright or has failed maxAttempts times, so undeliverable
 // addresses can't hold up everyone else's. A failure of the relay itself ends the poll
-// without counting against anyone. Invitations to events already over aren't sent.
+// without counting against anyone. Invitations to events already over aren't sent, and
+// a series' occurrences are invited once they're within the window the scheduler keeps
+// materialized, however far ahead a calendar view has generated them.
 func (w *Worker) processInvitations(ctx context.Context) {
 	rows, err := w.pool.Query(ctx, `
 		SELECT i.id, i.token, i.email, i.attempts, i.updated_at, e.title, e.location, e.start_time
@@ -189,8 +195,9 @@ func (w *Worker) processInvitations(ctx context.Context) {
 		JOIN events e ON e.id = i.event_id
 		WHERE i.status = 'pending_send' AND e.end_time > NOW()
 		  AND i.updated_at <= NOW() - i.attempts * i.attempts * interval '1 minute'
+		  AND (e.recurring_event_id IS NULL OR e.start_time <= NOW() + make_interval(days => $1::int))
 		ORDER BY i.updated_at
-		LIMIT 100`)
+		LIMIT 100`, repository.WindowDays)
 	if err != nil {
 		log.Printf("poll invitations: %v", err)
 		return
@@ -230,6 +237,20 @@ func (w *Worker) processInvitations(ctx context.Context) {
 				log.Printf("mail relay unavailable, retrying invitations next poll: %v", err)
 				return
 			}
+			// Recorded only if unchanged since it was read, as when marking it sent: an
+			// edit meanwhile has reset it for a fresh send.
+			if mailer.RelayRefused(err) {
+				// Not this invitation's fault: it stays pending, uncounted, behind the rest of
+				// the queue, until the relay's configuration lets it through.
+				log.Printf("send invitation %s: relay refused it, retrying later: %v", inv.id, err)
+				if _, err := w.pool.Exec(ctx, `
+					UPDATE event_invitations SET last_error = $2, updated_at = NOW()
+					WHERE id = $1 AND status = 'pending_send' AND updated_at = $3`,
+					inv.id, err.Error(), inv.updatedAt); err != nil {
+					log.Printf("record invitation failure %s: %v", inv.id, err)
+				}
+				continue
+			}
 			status := "pending_send"
 			if mailer.Permanent(err) || inv.attempts+1 >= maxAttempts {
 				status = "failed"
@@ -238,8 +259,8 @@ func (w *Worker) processInvitations(ctx context.Context) {
 			if _, err := w.pool.Exec(ctx, `
 				UPDATE event_invitations
 				SET attempts = attempts + 1, last_error = $2, status = $3, updated_at = NOW()
-				WHERE id = $1 AND status = 'pending_send'`,
-				inv.id, err.Error(), status); err != nil {
+				WHERE id = $1 AND status = 'pending_send' AND updated_at = $4`,
+				inv.id, err.Error(), status, inv.updatedAt); err != nil {
 				log.Printf("record invitation failure %s: %v", inv.id, err)
 			}
 			continue

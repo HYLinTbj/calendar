@@ -115,10 +115,10 @@ func (h *EventHandler) List(c *gin.Context) {
 		to = &t
 	}
 
-	// Occurrences are materialized a rolling window ahead; a range reaching past it gets
-	// its series' occurrences generated on demand. Best effort: the list still works
-	// (just without those occurrences) if this fails.
-	if to != nil {
+	// Occurrences are materialized a rolling window ahead (by the scheduler, hourly); a
+	// range reaching past it gets its series' occurrences generated on demand. Best effort:
+	// the list still works (just without those occurrences) if this fails.
+	if to != nil && to.After(time.Now().Add((repository.WindowDays-1)*24*time.Hour)) {
 		if err := h.recurringRepo.ExtendThrough(c.Request.Context(), ownerID, calendarID, *to); err != nil {
 			log.Printf("extend recurring events through %s: %v", to.Format(time.RFC3339), err)
 		}

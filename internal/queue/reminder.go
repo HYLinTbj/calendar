@@ -48,7 +48,8 @@ func (q *ReminderQueue) Schedule(ctx context.Context, jobs []ReminderJob) error 
 	}
 	eventID := due[0].EventID
 	var minutesList []int
-	pipe := q.rdb.Pipeline()
+	// Atomic, so the worker never sees a queue entry without its payload (see ClearOrphan).
+	pipe := q.rdb.TxPipeline()
 	for _, job := range due {
 		sendAt := job.StartTime.Add(-time.Duration(job.Minutes) * time.Minute)
 		member := memberKey(job.EventID, job.Minutes)
@@ -66,7 +67,10 @@ func (q *ReminderQueue) Schedule(ctx context.Context, jobs []ReminderJob) error 
 	return err
 }
 
-// Cancel removes all reminders for the given event from the queue.
+// Cancel removes the given event's reminders that haven't come due yet from the queue.
+// Due ones are left to the worker, which sends each from the event as it is now, or
+// drops it if the event or that reminder is gone: Schedule skips past send times, so
+// one cancelled by an edit before the worker got to it would never be sent.
 func (q *ReminderQueue) Cancel(ctx context.Context, eventID uuid.UUID) error {
 	metaKey := "reminder_meta:" + eventID.String()
 	metaData, err := q.rdb.Get(ctx, metaKey).Bytes()
@@ -80,9 +84,15 @@ func (q *ReminderQueue) Cancel(ctx context.Context, eventID uuid.UUID) error {
 	if err := json.Unmarshal(metaData, &minutesList); err != nil {
 		return err
 	}
+	now := time.Now()
 	pipe := q.rdb.Pipeline()
 	for _, m := range minutesList {
 		member := memberKey(eventID, m)
+		var job ReminderJob
+		if data, err := q.rdb.Get(ctx, "reminder:"+member).Bytes(); err == nil && json.Unmarshal(data, &job) == nil &&
+			!job.StartTime.Add(-time.Duration(job.Minutes)*time.Minute).After(now) {
+			continue
+		}
 		pipe.ZRem(ctx, "reminders", member)
 		pipe.Del(ctx, "reminder:"+member)
 	}
@@ -109,7 +119,19 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
   return 1
 end
 return 0`)
+	orphanScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  redis.call('ZREM', KEYS[2], ARGV[1])
+  return 1
+end
+return 0`)
 )
+
+// ClearOrphan removes member, whose payload the worker found gone (it was cancelled),
+// from the queue — unless it has been scheduled again since.
+func (q *ReminderQueue) ClearOrphan(ctx context.Context, member string) error {
+	return orphanScript.Run(ctx, q.rdb, []string{"reminder:" + member, "reminders"}, member).Err()
+}
 
 // Retry stores job's updated state (Attempts, Pending) and re-queues it to be sent at
 // at, unless the job has changed since it was read as prev.

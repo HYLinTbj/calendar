@@ -249,6 +249,13 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		ALTER TABLE users
 			ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0;
 
+		-- One-off data fixes run at api startup, recorded here once done so later
+		-- startups skip them (see RecurringEventRepository.RepairLegacyExceptions).
+		CREATE TABLE IF NOT EXISTS maintenance_runs (
+			name    TEXT        PRIMARY KEY,
+			done_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
 		-- Emails are case-insensitive: stored lowercased, unique regardless of case, so
 		-- Bob@corp.com can't be registered next to bob@corp.com and receive their shares.
 		-- Existing addresses are lowercased where that doesn't collide with another

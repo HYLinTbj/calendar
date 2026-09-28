@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"time"
 
@@ -308,6 +309,7 @@ func (r *EventRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req
 		return nil, err
 	}
 	recurringEventID, occurrence := current.RecurringEventID, current.StartTime
+	before := *current
 	if req.CalendarID != nil {
 		current.CalendarID = *req.CalendarID
 	}
@@ -345,6 +347,21 @@ func (r *EventRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req
 		current.Visibility = *req.Visibility
 	}
 
+	// Saving a series instance without changing anything (the modal's Save, a Log-view
+	// re-save) isn't an edit: leave it linked rather than detach it below. It still takes
+	// write access, as an edit would.
+	if recurringEventID != nil && sameEventFields(&before, current) {
+		var ok bool
+		if err := r.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM events WHERE id = $1 AND `+eventWriteAccess(2)+`)`, id, ownerID).Scan(&ok); err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, pgx.ErrNoRows
+		}
+		return current, nil
+	}
+
 	// Editing a series instance on its own makes it an exception: detach it into a
 	// standalone event and add its occurrence time to the series' exdates, so a later
 	// series-wide edit (which regenerates future instances) neither overwrites nor
@@ -374,6 +391,16 @@ func (r *EventRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req
 		current.AllDay, current.Timezone, current.CategoryID, current.Visibility,
 		id, ownerID, recurringEventID, occurrence), &e)
 	return &e, err
+}
+
+// sameEventFields reports whether a and b agree on everything Update can change.
+func sameEventFields(a, b *model.Event) bool {
+	return a.CalendarID == b.CalendarID && a.Title == b.Title && a.Description == b.Description &&
+		a.Location == b.Location && a.StartTime.Equal(b.StartTime) && a.EndTime.Equal(b.EndTime) &&
+		slices.Equal(a.Attendees, b.Attendees) && slices.Equal(a.Reminders, b.Reminders) &&
+		a.AllDay == b.AllDay && a.Timezone == b.Timezone && a.Visibility == b.Visibility &&
+		((a.CategoryID == nil && b.CategoryID == nil) ||
+			(a.CategoryID != nil && b.CategoryID != nil && *a.CategoryID == *b.CategoryID))
 }
 
 // Delete removes an event, returning pgx.ErrNoRows if the caller may not (see

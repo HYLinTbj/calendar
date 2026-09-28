@@ -63,9 +63,10 @@ func (m *Mailer) SendReminder(to, title string, startTime time.Time) error {
 
 // Permanent reports whether retrying this message can't help: the relay rejected the
 // recipient or message outright (5xx), or the address can't be put in an SMTP command.
+// A relay refusing to relay for us (see RelayRefused) isn't about the message.
 func Permanent(err error) bool {
 	var re *RecipientError
-	if !errors.As(err, &re) {
+	if !errors.As(err, &re) || RelayRefused(err) {
 		return false
 	}
 	var tpErr *textproto.Error
@@ -73,6 +74,20 @@ func Permanent(err error) bool {
 		return tpErr.Code >= 500
 	}
 	return strings.Contains(err.Error(), "must not contain CR or LF")
+}
+
+// RelayRefused reports whether the relay turned a recipient down because it won't relay
+// for us ("554 5.7.1 Relay access denied", or authentication required) rather than
+// because of the address. Its configuration is at fault, and it may still accept other
+// recipients (its own domains), so the send is worth retrying once that's fixed.
+func RelayRefused(err error) bool {
+	var re *RecipientError
+	var tpErr *textproto.Error
+	if !errors.As(err, &re) || !errors.As(err, &tpErr) {
+		return false
+	}
+	msg := strings.ToLower(tpErr.Msg)
+	return tpErr.Code == 530 || strings.Contains(msg, "relay") || strings.Contains(msg, "authenticat")
 }
 
 // Systemic reports whether err is the relay's (unreachable, or refusing this sender)
