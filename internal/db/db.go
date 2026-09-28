@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -205,8 +206,82 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		);
 
 		CREATE INDEX IF NOT EXISTS tasks_owner_area_idx ON tasks (owner_id, area_id);
+
+		-- Occurrence start times a series must not (re)generate: ones deleted on their own,
+		-- or edited on their own (which detaches them into standalone events). They still
+		-- count toward max_occurrences, as EXDATE does against COUNT in RFC 5545.
+		ALTER TABLE recurring_events
+			ADD COLUMN IF NOT EXISTS exdates TIMESTAMPTZ[] NOT NULL DEFAULT '{}';
+
+		-- An instance detached by an edit keeps a link to its series and the occurrence it
+		-- was, so deleting the series (or this-and-following) still removes it.
+		ALTER TABLE events
+			ADD COLUMN IF NOT EXISTS detached_from UUID REFERENCES recurring_events(id) ON DELETE CASCADE;
+
+		ALTER TABLE events
+			ADD COLUMN IF NOT EXISTS original_start TIMESTAMPTZ;
+
+		CREATE INDEX IF NOT EXISTS events_detached_from_idx
+			ON events (detached_from) WHERE detached_from IS NOT NULL;
+
+		-- Invitation sends that keep failing give up (status 'failed') instead of being
+		-- retried forever at the head of the queue.
+		ALTER TABLE event_invitations
+			ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+
+		ALTER TABLE event_invitations
+			ADD COLUMN IF NOT EXISTS last_error TEXT;
+
+		CREATE INDEX IF NOT EXISTS event_invitations_pending_idx
+			ON event_invitations (updated_at) WHERE status = 'pending_send';
+
+		-- Series imported from ICS keep their attendees but don't invite them: the importer
+		-- isn't the organizer.
+		ALTER TABLE recurring_events
+			ADD COLUMN IF NOT EXISTS send_invitations BOOLEAN NOT NULL DEFAULT true;
+
+		-- A series can be private like a single event; its occurrences inherit it.
+		ALTER TABLE recurring_events
+			ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'public';
+
+		-- Login tokens carry the user's token_version; a password change bumps it, which
+		-- signs out every session issued with the old password.
+		ALTER TABLE users
+			ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0;
+
+		-- Emails are case-insensitive: stored lowercased, unique regardless of case, so
+		-- Bob@corp.com can't be registered next to bob@corp.com and receive their shares.
+		-- Existing addresses are lowercased where that doesn't collide with another
+		-- account; if accounts differing only in case already exist, the unique index is
+		-- left out (with a warning) rather than failing startup — resolve them by hand.
+		DO $$
+		BEGIN
+			UPDATE users u SET email = lower(u.email)
+			WHERE u.email <> lower(u.email)
+			  AND NOT EXISTS (SELECT 1 FROM users o WHERE o.id <> u.id AND lower(o.email) = lower(u.email));
+			IF NOT EXISTS (SELECT 1 FROM users GROUP BY lower(email) HAVING count(*) > 1) THEN
+				CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uniq ON users (lower(email));
+			ELSE
+				RAISE WARNING 'users with emails differing only in case exist; users_email_lower_uniq not created';
+			END IF;
+		END $$;
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Surface the case above where the operator will see it (Postgres only sends the
+	// WARNING to its own log).
+	var dups int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM (SELECT 1 FROM users GROUP BY lower(email) HAVING count(*) > 1) d`,
+	).Scan(&dups); err != nil {
+		return err
+	}
+	if dups > 0 {
+		log.Printf("WARNING: %d email address(es) are used by more than one account when compared case-insensitively; "+
+			"emails aren't unique regardless of case until those are resolved (then restart)", dups)
+	}
+	return nil
 }
 
 func getEnv(key, fallback string) string {

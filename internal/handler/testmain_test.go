@@ -30,6 +30,7 @@ var (
 
 func TestMain(m *testing.M) {
 	gin.SetMode(gin.TestMode)
+	os.Setenv("JWT_SECRET", "test-only-secret-0123456789abcdef0123456789abcdef")
 	ctx := context.Background()
 
 	pgContainer, err := tcpostgres.Run(ctx, "postgres:16-alpine",
@@ -108,7 +109,7 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 		auth.POST("/login", authHandler.Login)
 	}
 
-	protected := r.Group("/", middleware.Auth())
+	protected := r.Group("/", middleware.Auth(userRepo))
 	{
 		users := protected.Group("/users")
 		{
@@ -144,6 +145,7 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 			events.PUT("/:id", eventHandler.Update)
 			events.PUT("/:id/recurrence", eventHandler.UpdateRecurrence)
 			events.DELETE("/:id", eventHandler.Delete)
+			events.DELETE("/:id/recurrence", eventHandler.DeleteRecurrence)
 		}
 
 		cats := protected.Group("/categories")

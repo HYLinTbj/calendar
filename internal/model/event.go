@@ -14,7 +14,8 @@ type Reminder struct {
 }
 
 // AttendeeStatus pairs an attendee email with their RSVP response.
-// Status values: "needs_action" | "accepted" | "declined" | "tentative"
+// Status values: "needs_action" | "accepted" | "declined" | "tentative" | "failed"
+// (the invitation couldn't be delivered).
 type AttendeeStatus struct {
 	Email  string `json:"email"`
 	Status string `json:"status"`
@@ -48,12 +49,12 @@ type CreateEventRequest struct {
 	Location    string     `json:"location"`
 	StartTime   time.Time  `json:"start_time" binding:"required"`
 	EndTime     time.Time  `json:"end_time"   binding:"required"`
-	Attendees   []string   `json:"attendees"`
+	Attendees   []string   `json:"attendees" binding:"omitempty,max=100,dive,email"`
 	Reminders   []Reminder `json:"reminders"`
 	AllDay      bool       `json:"all_day"`
 	Timezone    string     `json:"timezone"`
 	CategoryID  *uuid.UUID `json:"category_id"`
-	Visibility  string     `json:"visibility"`
+	Visibility  string     `json:"visibility" binding:"omitempty,oneof=public private"`
 }
 
 type UpdateEventRequest struct {
@@ -63,11 +64,11 @@ type UpdateEventRequest struct {
 	Location    *string    `json:"location"`
 	StartTime   *time.Time `json:"start_time"`
 	EndTime     *time.Time `json:"end_time"`
-	Attendees   []string   `json:"attendees"`
+	Attendees   []string   `json:"attendees" binding:"omitempty,max=100,dive,email"`
 	Reminders   []Reminder `json:"reminders"`
 	AllDay      *bool      `json:"all_day"`
 	Timezone    *string    `json:"timezone"`
 	// Optional so an explicit null clears the category; absent keeps it.
 	CategoryID Optional[uuid.UUID] `json:"category_id"`
-	Visibility *string             `json:"visibility"`
+	Visibility *string             `json:"visibility" binding:"omitempty,oneof=public private"`
 }

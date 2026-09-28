@@ -30,7 +30,7 @@ func truncateAll(t *testing.T, pool *pgxpool.Pool) {
 	require.NoError(t, testRDB.FlushDB(context.Background()).Err())
 }
 
-// MintJWT returns a signed JWT for the given userID using the default dev secret.
+// MintJWT returns a signed JWT for the given userID using the test JWT_SECRET (see TestMain).
 func MintJWT(t *testing.T, userID uuid.UUID) string {
 	t.Helper()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, middleware.Claims{

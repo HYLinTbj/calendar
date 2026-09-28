@@ -125,7 +125,7 @@ func TestReminderQueue_Schedule_SetsCorrectScore(t *testing.T) {
 	ctx := context.Background()
 
 	eventID := uuid.New()
-	start := time.Date(2024, 6, 15, 10, 0, 0, 0, time.UTC)
+	start := time.Now().UTC().Truncate(time.Minute).Add(48 * time.Hour) // future: past send times are skipped
 	jobs := []queue.ReminderJob{
 		{EventID: eventID, Minutes: 15, Method: "email", Title: "Meeting", StartTime: start},
 	}
@@ -137,4 +137,74 @@ func TestReminderQueue_Schedule_SetsCorrectScore(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.InDelta(t, float64(expected), members[0].Score, 1.0)
+}
+
+func TestReminderQueue_Schedule_SkipsPastSendTimes(t *testing.T) {
+	rdb := newTestRedis(t)
+	q := queue.NewReminderQueue(rdb)
+	ctx := context.Background()
+
+	eventID := uuid.New()
+	start := time.Now().Add(20 * time.Minute)
+	require.NoError(t, q.Schedule(ctx, []queue.ReminderJob{
+		{EventID: eventID, Minutes: 30, Method: "email", Title: "Soon", StartTime: start}, // due 10 min ago
+		{EventID: eventID, Minutes: 10, Method: "email", Title: "Soon", StartTime: start}, // due in 10 min
+	}))
+	members, err := rdb.ZRange(ctx, "reminders", 0, -1).Result()
+	require.NoError(t, err)
+	assert.Equal(t, []string{eventID.String() + ":10"}, members, "a reminder whose time has passed isn't queued (it would fire at once)")
+
+	// An event that already happened queues nothing, e.g. when it's edited afterwards.
+	past := uuid.New()
+	require.NoError(t, q.Schedule(ctx, []queue.ReminderJob{
+		{EventID: past, Minutes: 10, Method: "email", Title: "Yesterday", StartTime: time.Now().Add(-24 * time.Hour)},
+	}))
+	n, err := rdb.Exists(ctx, "reminder_meta:"+past.String()).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+}
+
+func TestReminderQueue_RetryAndDone_LeaveARescheduledJobAlone(t *testing.T) {
+	rdb := newTestRedis(t)
+	q := queue.NewReminderQueue(rdb)
+	ctx := context.Background()
+
+	eventID := uuid.New()
+	member := eventID.String() + ":10"
+	job := queue.ReminderJob{EventID: eventID, Minutes: 10, Method: "email", Title: "Sync", StartTime: time.Now().Add(time.Hour)}
+	require.NoError(t, q.Schedule(ctx, []queue.ReminderJob{job}))
+	read, err := rdb.Get(ctx, "reminder:"+member).Result()
+	require.NoError(t, err)
+
+	// While the worker is sending, the event moves: the job is rescheduled under the same key.
+	moved := job
+	moved.StartTime = time.Now().Add(7 * 24 * time.Hour)
+	require.NoError(t, q.Schedule(ctx, []queue.ReminderJob{moved}))
+	current, err := rdb.Get(ctx, "reminder:"+member).Result()
+	require.NoError(t, err)
+
+	// The worker's retry and done both see a changed job and leave it alone.
+	retried := job
+	retried.Attempts, retried.Pending = 1, []string{"r2@example.com"}
+	require.NoError(t, q.Retry(ctx, read, retried, time.Now().Add(time.Minute)))
+	require.NoError(t, q.Done(ctx, member, read))
+	after, err := rdb.Get(ctx, "reminder:"+member).Result()
+	require.NoError(t, err)
+	assert.Equal(t, current, after, "the rescheduled job survives")
+	score, err := rdb.ZScore(ctx, "reminders", member).Result()
+	require.NoError(t, err)
+	assert.InDelta(t, float64(moved.StartTime.Add(-10*time.Minute).Unix()), score, 1)
+
+	// Unchanged, they apply.
+	require.NoError(t, q.Retry(ctx, current, retried, time.Now().Add(time.Minute)))
+	requeued, err := rdb.Get(ctx, "reminder:"+member).Result()
+	require.NoError(t, err)
+	assert.Contains(t, requeued, `"attempts":1`)
+	require.NoError(t, q.Done(ctx, member, requeued))
+	n, err := rdb.Exists(ctx, "reminder:"+member).Result()
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	card, err := rdb.ZCard(ctx, "reminders").Result()
+	require.NoError(t, err)
+	assert.Zero(t, card)
 }

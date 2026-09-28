@@ -17,6 +17,10 @@ type ReminderJob struct {
 	Title     string    `json:"title"`
 	StartTime time.Time `json:"start_time"`
 	Attendees []string  `json:"attendees"`
+	// Attempts and Pending track a send that failed for some recipients: how many tries
+	// so far, and who still hasn't been sent it (nil = everyone).
+	Attempts int      `json:"attempts,omitempty"`
+	Pending  []string `json:"pending,omitempty"`
 }
 
 type ReminderQueue struct {
@@ -29,14 +33,23 @@ func NewReminderQueue(rdb *redis.Client) *ReminderQueue {
 
 // Schedule enqueues one reminder per job, keyed by <event_id>:<minutes>.
 // A meta key tracks all minute-offsets so Cancel can clean them up efficiently.
+// Reminders whose send time has already passed are skipped: every edit reschedules an
+// event's reminders, and re-queuing a past one would send it again straight away.
 func (q *ReminderQueue) Schedule(ctx context.Context, jobs []ReminderJob) error {
-	if len(jobs) == 0 {
+	now := time.Now()
+	var due []ReminderJob
+	for _, job := range jobs {
+		if job.StartTime.Add(-time.Duration(job.Minutes) * time.Minute).After(now) {
+			due = append(due, job)
+		}
+	}
+	if len(due) == 0 {
 		return nil
 	}
-	eventID := jobs[0].EventID
+	eventID := due[0].EventID
 	var minutesList []int
 	pipe := q.rdb.Pipeline()
-	for _, job := range jobs {
+	for _, job := range due {
 		sendAt := job.StartTime.Add(-time.Duration(job.Minutes) * time.Minute)
 		member := memberKey(job.EventID, job.Minutes)
 		data, err := json.Marshal(job)
@@ -76,6 +89,43 @@ func (q *ReminderQueue) Cancel(ctx context.Context, eventID uuid.UUID) error {
 	pipe.Del(ctx, metaKey)
 	_, err = pipe.Exec(ctx)
 	return err
+}
+
+// The worker finishes or re-queues a job only if it's unchanged since the worker read
+// it (prev): an edit to the event meanwhile reschedules it under the same key, and that
+// newer job must not be overwritten or deleted.
+var (
+	retryScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[2])
+  redis.call('ZADD', KEYS[2], ARGV[3], ARGV[4])
+  return 1
+end
+return 0`)
+	doneScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', KEYS[2], ARGV[2])
+  return 1
+end
+return 0`)
+)
+
+// Retry stores job's updated state (Attempts, Pending) and re-queues it to be sent at
+// at, unless the job has changed since it was read as prev.
+func (q *ReminderQueue) Retry(ctx context.Context, prev string, job ReminderJob, at time.Time) error {
+	member := memberKey(job.EventID, job.Minutes)
+	data, err := json.Marshal(job)
+	if err != nil {
+		return err
+	}
+	return retryScript.Run(ctx, q.rdb, []string{"reminder:" + member, "reminders"},
+		prev, string(data), at.Unix(), member).Err()
+}
+
+// Done removes a sent (or abandoned) job, unless it has changed since it was read as prev.
+func (q *ReminderQueue) Done(ctx context.Context, member, prev string) error {
+	return doneScript.Run(ctx, q.rdb, []string{"reminder:" + member, "reminders"}, prev, member).Err()
 }
 
 func memberKey(eventID uuid.UUID, minutes int) string {

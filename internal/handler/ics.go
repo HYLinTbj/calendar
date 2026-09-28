@@ -87,19 +87,19 @@ func (h *ICSHandler) Import(c *gin.Context) {
 	ctx := c.Request.Context()
 	imported := 0
 
+	// Imported events keep their attendees but invite nobody: the importer isn't the
+	// organizer, and a calendar export would otherwise email everyone on every past and
+	// future meeting in it.
 	for _, req := range events {
-		e, err := h.eventRepo.Create(ctx, ownerID, calID, req)
-		if err != nil {
+		if _, err := h.eventRepo.Create(ctx, ownerID, calID, req); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
-		}
-		if len(req.Attendees) > 0 {
-			_ = h.inviteRepo.UpsertForEvent(ctx, e.ID, req.Attendees)
 		}
 		imported++
 	}
 
 	for _, req := range recurrings {
+		req.NoInvitations = true
 		if _, err := h.recurringRepo.Create(ctx, ownerID, calID, req); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

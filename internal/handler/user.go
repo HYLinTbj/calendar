@@ -38,10 +38,31 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// Changing how you sign in needs the current password: a stolen session alone
+	// mustn't be able to take the account over.
+	if req.Email != nil || req.Password != nil {
+		if req.CurrentPassword == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "current_password is required to change email or password"})
+			return
+		}
+		hash, err := h.repo.PasswordHash(c.Request.Context(), userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check password"})
+			return
+		}
+		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(*req.CurrentPassword)) != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "current password is incorrect"})
+			return
+		}
+	}
+	if req.Email != nil {
+		e := normalizeEmail(*req.Email)
+		req.Email = &e
+	}
 	var hashedPassword *string
 	if req.Password != nil {
-		if len(*req.Password) < 8 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "password must be at least 8 characters"})
+		if msg := passwordProblem(*req.Password); msg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
 			return
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(*req.Password), bcrypt.DefaultCost)
@@ -62,7 +83,21 @@ func (h *UserHandler) UpdateProfile(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, user)
+	if hashedPassword == nil {
+		c.JSON(http.StatusOK, user)
+		return
+	}
+	// The new password signed out every session, this one included; hand back a fresh
+	// token so the caller can carry on.
+	token, err := issueToken(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sign token"})
+		return
+	}
+	c.JSON(http.StatusOK, struct {
+		*model.User
+		Token string `json:"token"`
+	}{user, token})
 }
 
 func (h *UserHandler) DeleteAccount(c *gin.Context) {

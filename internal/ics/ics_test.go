@@ -93,6 +93,24 @@ func TestExport_RecurringEventEmitsRrule(t *testing.T) {
 	assert.Contains(t, out, "UNTIL=")
 }
 
+func TestExport_RecurringEventEmitsExdates(t *testing.T) {
+	timed := model.RecurringEvent{
+		ID: fixedID, Title: "Daily", Frequency: "daily", Interval: 1,
+		StartTime: fixedTime, Duration: int64(time.Hour), CreatedAt: fixedTime, UpdatedAt: fixedTime,
+		Exdates: []time.Time{fixedTime.AddDate(0, 0, 2)},
+	}
+	allDay := model.RecurringEvent{
+		ID: uuid.New(), Title: "Daily all-day", Frequency: "daily", Interval: 1, AllDay: true,
+		StartTime: time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC), Duration: int64(24*time.Hour - time.Second),
+		CreatedAt: fixedTime, UpdatedAt: fixedTime,
+		Exdates: []time.Time{time.Date(2024, 6, 18, 0, 0, 0, 0, time.UTC)},
+	}
+	out := ics.Export("", nil, []model.RecurringEvent{timed, allDay})
+
+	assert.Contains(t, out, "EXDATE:20240617T090000Z")
+	assert.Contains(t, out, "EXDATE;VALUE=DATE:20240618")
+}
+
 func TestExport_ExpandedInstanceSkipped(t *testing.T) {
 	recurID := uuid.MustParse("00000000-0000-0000-0000-000000000099")
 	e := model.Event{
@@ -229,6 +247,39 @@ END:VCALENDAR`
 	assert.Nil(t, rec.EndDate)
 }
 
+func TestImport_RecurringExdates(t *testing.T) {
+	icsData := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:rec-ex
+DTSTART;TZID=America/New_York:20240101T100000
+DTEND;TZID=America/New_York:20240101T110000
+RRULE:FREQ=DAILY;COUNT=5
+EXDATE;TZID=America/New_York:20240102T100000,20240103T100000
+EXDATE:20240104T150000Z
+SUMMARY:Daily with gaps
+END:VEVENT
+BEGIN:VEVENT
+UID:rec-ex-allday
+DTSTART;VALUE=DATE:20240101
+DTEND;VALUE=DATE:20240102
+RRULE:FREQ=DAILY;COUNT=3
+EXDATE;VALUE=DATE:20240102
+SUMMARY:All-day with a gap
+END:VEVENT
+END:VCALENDAR`
+
+	_, recurrings, err := ics.Import(fixedCalID, strings.NewReader(icsData))
+	require.NoError(t, err)
+	require.Len(t, recurrings, 2)
+	assert.Equal(t, []time.Time{
+		time.Date(2024, 1, 2, 15, 0, 0, 0, time.UTC),
+		time.Date(2024, 1, 3, 15, 0, 0, 0, time.UTC),
+		time.Date(2024, 1, 4, 15, 0, 0, 0, time.UTC),
+	}, recurrings[0].Exdates)
+	assert.Equal(t, []time.Time{time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)}, recurrings[1].Exdates)
+}
+
 func TestImport_RecurringWeeklyWithByday(t *testing.T) {
 	icsData := `BEGIN:VCALENDAR
 VERSION:2.0
@@ -307,4 +358,26 @@ END:VCALENDAR`
 	require.Len(t, events, 1)
 	// End before start → defaulted to start + 1 hour
 	assert.Equal(t, fixedTime.Add(time.Hour), events[0].EndTime)
+}
+
+func TestICS_PrivacyRoundTrips(t *testing.T) {
+	private := model.Event{ID: fixedID, Title: "Therapy", StartTime: fixedTime, EndTime: fixedEnd,
+		Visibility: "private", CreatedAt: fixedTime, UpdatedAt: fixedTime}
+	series := model.RecurringEvent{ID: uuid.New(), Title: "Weekly therapy", Frequency: "weekly", Interval: 1,
+		StartTime: fixedTime, Duration: int64(time.Hour), Visibility: "private", CreatedAt: fixedTime, UpdatedAt: fixedTime}
+	out := ics.Export("", []model.Event{private}, []model.RecurringEvent{series})
+	assert.Equal(t, 2, strings.Count(out, "CLASS:PRIVATE"))
+
+	events, recurrings, err := ics.Import(fixedCalID, strings.NewReader(out))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Len(t, recurrings, 1)
+	assert.Equal(t, "private", events[0].Visibility)
+	assert.Equal(t, "private", recurrings[0].Visibility)
+
+	confidential := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:c\r\nDTSTART:20240101T100000Z\r\n" +
+		"DTEND:20240101T110000Z\r\nCLASS:CONFIDENTIAL\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	events, _, err = ics.Import(fixedCalID, strings.NewReader(confidential))
+	require.NoError(t, err)
+	assert.Equal(t, "private", events[0].Visibility)
 }

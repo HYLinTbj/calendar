@@ -28,6 +28,15 @@ type RecurringEvent struct {
 	GeneratedUntil time.Time  `json:"generated_until"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+
+	// Exdates are occurrence start times excluded from the series (deleted, or edited
+	// into standalone events). They still count toward MaxOccurrences.
+	Exdates []time.Time `json:"exdates"`
+	// SendInvitations is false for series imported from ICS, whose importer isn't the
+	// organizer: their occurrences don't invite the attendees.
+	SendInvitations bool `json:"-"`
+	// Visibility ("public" | "private") is given to every occurrence.
+	Visibility string `json:"visibility"`
 }
 
 type CreateRecurringEventRequest struct {
@@ -37,16 +46,21 @@ type CreateRecurringEventRequest struct {
 	Location       string     `json:"location"`
 	StartTime      time.Time  `json:"start_time"  binding:"required"`
 	EndTime        time.Time  `json:"end_time"    binding:"required"`
-	Attendees      []string   `json:"attendees"`
+	Attendees      []string   `json:"attendees" binding:"omitempty,max=100,dive,email"`
 	Reminders      []Reminder `json:"reminders"`
 	Frequency      string     `json:"frequency"   binding:"required,oneof=daily weekly monthly yearly"`
 	Interval       int        `json:"interval"`
 	DaysOfWeek     []int      `json:"days_of_week"`
 	EndDate        *time.Time `json:"end_date"`
-	MaxOccurrences *int       `json:"max_occurrences"`
+	MaxOccurrences *int       `json:"max_occurrences" binding:"omitempty,min=1"`
 	AllDay         bool       `json:"all_day"`
 	Timezone       string     `json:"timezone"`
 	CategoryID     *uuid.UUID `json:"category_id"`
+
+	Exdates []time.Time `json:"exdates"`
+	// NoInvitations: see RecurringEvent.SendInvitations. Set by ICS import only.
+	NoInvitations bool   `json:"-"`
+	Visibility    string `json:"visibility" binding:"omitempty,oneof=public private"`
 }
 
 type UpdateRecurringEventRequest struct {
@@ -56,16 +70,17 @@ type UpdateRecurringEventRequest struct {
 	Location       *string    `json:"location"`
 	StartTime      *time.Time `json:"start_time"`
 	EndTime        *time.Time `json:"end_time"`
-	Attendees      []string   `json:"attendees"`
+	Attendees      []string   `json:"attendees" binding:"omitempty,max=100,dive,email"`
 	Reminders      []Reminder `json:"reminders"`
 	Frequency      *string    `json:"frequency"  binding:"omitempty,oneof=daily weekly monthly yearly"`
 	Interval       *int       `json:"interval"`
 	DaysOfWeek     []int      `json:"days_of_week"`
 	EndDate        *time.Time `json:"end_date"`
-	MaxOccurrences *int       `json:"max_occurrences"`
+	MaxOccurrences *int       `json:"max_occurrences" binding:"omitempty,min=1"`
 	AllDay         *bool      `json:"all_day"`
 	Timezone       *string    `json:"timezone"`
 	CategoryID     *uuid.UUID `json:"category_id"`
+	Visibility     *string    `json:"visibility" binding:"omitempty,oneof=public private"`
 }
 
 // UpdateRecurrenceRequest is used by PUT /events/:id/recurrence to edit one instance,
@@ -77,10 +92,10 @@ type UpdateRecurrenceRequest struct {
 	Location    *string    `json:"location"`
 	StartTime   *time.Time `json:"start_time"`
 	EndTime     *time.Time `json:"end_time"`
-	Attendees   []string   `json:"attendees"`
+	Attendees   []string   `json:"attendees" binding:"omitempty,max=100,dive,email"`
 	Reminders   []Reminder `json:"reminders"`
 	AllDay      *bool      `json:"all_day"`
 	Timezone    *string    `json:"timezone"`
 	CategoryID  *uuid.UUID `json:"category_id"`
-	Visibility  *string    `json:"visibility"`
+	Visibility  *string    `json:"visibility" binding:"omitempty,oneof=public private"`
 }

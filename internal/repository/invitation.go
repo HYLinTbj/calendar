@@ -47,18 +47,20 @@ func (r *InvitationRepository) UpsertForEvent(ctx context.Context, eventID uuid.
 }
 
 // ReInviteChanged resets attendees to pending_send when event details change
-// so they receive an updated invite. Only affects rows already in 'sent' state
-// (not accepted/declined — those people made a decision).
+// so they receive an updated invite, starting its attempts afresh. Affects rows in
+// 'sent' and 'failed' state (not accepted/declined — those people made a decision),
+// and bumps updated_at on ones still pending, so a send already in flight with the old
+// details doesn't mark them sent (the worker only marks rows unchanged since it read them).
 func (r *InvitationRepository) ReInviteChanged(ctx context.Context, eventID uuid.UUID, emails []string) error {
 	if len(emails) == 0 {
 		return nil
 	}
 	_, err := r.pool.Exec(ctx, `
 		UPDATE event_invitations
-		SET status = 'pending_send', updated_at = NOW()
+		SET status = 'pending_send', attempts = 0, last_error = NULL, updated_at = NOW()
 		WHERE event_id = $1
 		  AND email = ANY($2)
-		  AND status = 'sent'`,
+		  AND status IN ('sent', 'pending_send', 'failed')`,
 		eventID, emails)
 	return err
 }
@@ -92,7 +94,8 @@ func (r *InvitationRepository) UpdateStatus(ctx context.Context, token uuid.UUID
 }
 
 // ListStatusesByEvent returns per-attendee RSVP statuses for an event.
-// Internal statuses (pending_send, sent) are surfaced as "needs_action".
+// Internal statuses (pending_send, sent) are surfaced as "needs_action"; "failed" (the
+// invitation couldn't be delivered) is surfaced as is.
 func (r *InvitationRepository) ListStatusesByEvent(ctx context.Context, eventID uuid.UUID) ([]model.AttendeeStatus, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT email, status FROM event_invitations WHERE event_id = $1 ORDER BY email`,
@@ -110,7 +113,7 @@ func (r *InvitationRepository) ListStatusesByEvent(ctx context.Context, eventID 
 			return nil, err
 		}
 		switch raw {
-		case "accepted", "declined", "tentative":
+		case "accepted", "declined", "tentative", "failed":
 			s.Status = raw
 		default:
 			s.Status = "needs_action"

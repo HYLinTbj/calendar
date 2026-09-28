@@ -28,8 +28,11 @@ go test -tags integration ./internal/handler/ -run TestEventStats_Endpoint   # s
 ## Run the stack
 
 ```bash
+cp .env.example .env && sed -i "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" .env   # once; .env is gitignored
 docker compose up --build          # api :8080, nginx :80, postgres host :5433, redis :6379, mailhog UI :8025
 ```
+
+The api refuses to start without a `JWT_SECRET` of at least 32 bytes (there is deliberately no default); running it outside compose needs the variable exported too.
 
 Schema is created/upgraded automatically at api startup (see migrations below) — there is no separate migrate step. The UI is `http://localhost/` (nginx serves `Calendar.html` as index, proxies `/api/` to the api); the api is also reachable directly at `:8080`. Captured emails appear in MailHog at `:8025`. Note Postgres is published on host port **5433** (internal 5432).
 
@@ -56,8 +59,12 @@ This is why services import `github.com/hylin/calendar/internal/...` for shared 
 `model` (structs + request DTOs with `binding` tags) → `repository` (SQL via pgx/v5 pool) → `handler` (Gin) → routes wired in `api/cmd/api/main.go`. Cross-cutting conventions that repeat across entities — match them when adding code:
 
 - **Multi-tenant by `owner_id`**: every repository query filters/scopes by the owner. Handlers read the caller via `c.MustGet(middleware.UserIDKey).(uuid.UUID)`.
+  - **Exception, events in shared calendars:** writes go through `eventWriteAccess` in `repository/event.go`. The calendar's owner may always write. The event's author may write only while they hold an `edit` share. Series can only live in calendars their owner owns.
 - **Repository style**: a column-list `const`, a `scan*` helper, CRUD methods; `pgx.ErrNoRows` bubbles up and handlers translate it to 404. Helpers like `itoa` and unique-violation detection live alongside.
-- **Auth**: `middleware.Auth()` validates a JWT from the `Authorization: Bearer` header and sets `UserIDKey`. Token-only routes (invitation accept/decline) sit outside the auth group. `middleware.CORS()` is applied globally (wildcard origin; tokens travel in headers, not cookies).
+- **Auth**: `middleware.Auth(userRepo)` validates a JWT from the `Authorization: Bearer` header and sets `UserIDKey`. It also checks, one query per request, that the user still exists and that the token's `tv` claim matches `users.token_version`. A password change bumps that version, which signs out every older session. Changing email or password needs `current_password`.
+  - Token-only routes (invitation accept/decline) sit outside the auth group.
+  - `middleware.CORS()` is applied globally (wildcard origin; tokens travel in headers, not cookies).
+  - Emails are case-insensitive: they're stored lowercased (`normalizeEmail`) and matched with `lower(email)`.
 - **Calendar resolution**: event-creating handlers call `resolveCalendar` to fall back to the user's default calendar when none is given.
 
 ### Database & migrations
@@ -66,8 +73,14 @@ Schema lives **inline in `internal/db/db.go`'s `Migrate()`** as one idempotent S
 
 ### Async flows
 
-- **Reminders**: api enqueues reminder jobs to Redis via `internal/queue`; the notification worker polls and emails them. Editing/deleting an event cancels its pending reminder first.
-- **Recurring events**: the `events` table holds *materialized* instances; the scheduler extends the window. Recurrence edits take a `scope` of `this` | `this_and_following` | `all` (`PUT /events/:id/recurrence`), handled in `handler/event.go` + `repository/recurring_event.go`.
+- **Reminders**: api enqueues reminder jobs to Redis via `internal/queue`; the notification worker polls and emails them. Editing/deleting an event cancels and requeues its reminders, but only *after* the change applied: the queue is keyed by event id alone, so cancelling first would let any caller wipe another user's reminders. Reminders whose time has already passed aren't queued. The worker sends from the event's current row, one message per attendee, and drops a job whose event or reminder no longer exists. Some deletes (an account, a series) don't cancel their reminders.
+- **Invitations**: `event_invitations` rows in `pending_send` are mailed by the worker, oldest first.
+  - A row whose own send fails is retried with backoff, then set to `failed` (`attempts`, `last_error`). A failure of the mail relay itself (`mailer.Systemic`) ends the poll without counting against anyone. A later change to the event re-queues `failed` rows.
+  - Edits invite only newly added attendees.
+  - Attendee lists are validated as email addresses (max 100).
+  - ICS imports never invite anyone: `recurring_events.send_invitations=false` for imported series.
+- **Recurring events**: the `events` table holds *materialized* instances; the scheduler extends the window. Recurrence edits and deletes take a `scope` of `this` | `this_and_following` | `all` (`PUT` / `DELETE /events/:id/recurrence`), handled in `handler/event.go` + `repository/recurring_event.go`.
+  - **Exceptions**: any edit of a single instance (`EventRepository.Update`, which covers scope `this`, drag and the Log view) detaches it into a standalone event. Deleting one (`EventRepository.Delete`) removes it. Both append the instance's start time to `recurring_events.exdates`. Generation skips exdates but still counts them toward `max_occurrences`. So a *linked* instance's `start_time` is always its original occurrence time. Series-wide regeneration (`Update` / `SplitAt` delete linked future rows and regenerate) relies on this. Keep it true, and shift or carry exdates whenever you move a series' anchor. Data from before this rule (instances edited in place while still linked, recognisable by `updated_at > created_at`) is fixed at api startup by `RecurringEventRepository.RepairLegacyExceptions`.
 
 ### Time tracking = categorized events (no separate table)
 
