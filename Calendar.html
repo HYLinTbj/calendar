@@ -798,11 +798,17 @@
       });
       // Switching to all-day: a timed range shorter than a day is one day, even when it
       // crosses midnight (e.g. the default hour for an event started at 11:30 PM).
+      // Switching back: an all-day event's times (its UTC bounds, in local time) can be out
+      // of order, so an invalid range becomes an hour from the start.
       const toggleAllDay=e=>{
         const on=e.target.checked;
         setForm(f=>{
           const next={...f,all_day:on};
           if(on && combine(f.end_date,f.end_time)-combine(f.start_date,f.start_time)<86400000) next.end_date=f.start_date;
+          if(!on && !(combine(f.end_date,f.end_time)>combine(f.start_date,f.start_time))){
+            const ne=new Date(combine(f.start_date,f.start_time).getTime()+3600000);
+            next.end_date=ymd(ne); next.end_time=hhmm(ne);
+          }
           return next;
         });
       };
@@ -846,8 +852,13 @@
           const startISO = form.all_day
             ? `${form.start_date}T00:00:00Z`
             : new Date(`${form.start_date}T${form.start_time}:00`).toISOString();
+          // All-day events end at 23:59:59Z on their last day, or at 00:00Z the day after
+          // when imported from ICS (exclusive DTEND): keep the event's own convention, so
+          // saving it unchanged changes nothing.
+          const exclusiveEnd = isEdit && event.all_day && new Date(event.end_time).toISOString().slice(11,19)==='00:00:00';
+          const dayAfter = d => new Date(Date.parse(`${d}T00:00:00Z`)+86400000).toISOString().slice(0,10);
           const endISO   = form.all_day
-            ? `${form.end_date}T23:59:59Z`
+            ? (exclusiveEnd ? `${dayAfter(form.end_date)}T00:00:00Z` : `${form.end_date}T23:59:59Z`)
             : new Date(`${form.end_date}T${form.end_time}:00`).toISOString();
 
           if (isEdit && isRecurring) {
@@ -874,6 +885,9 @@
               frequency: form.repeat_freq,
               interval: Math.max(1, parseInt(form.repeat_interval, 10) || 1),
               days_of_week: form.repeat_freq === 'weekly' ? [...form.repeat_days].sort((a,b)=>a-b) : [],
+              // Weeks start on Sunday here, as in the day picker and the calendar; every
+              // 2+ weeks, the days of one such week repeat together.
+              week_start: form.repeat_freq === 'weekly' ? 0 : undefined,
               // Anchor to the creator's IANA zone; server defaults to UTC (no DST) when
               // omitted, which would visibly shift the displayed time across a DST change.
               timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -1368,10 +1382,10 @@
         clearTimer(uid); setRunning(null);
       }
 
-      // Pessimistic on purpose: unlike eventMoved's optimistic drag (which rolls
-      // back to data already durably saved server-side), the localStorage entry
-      // here is the *only* copy of this session until the POST succeeds, so it's
-      // left untouched on failure — nothing is lost, and Stop/Discard can be retried.
+      // The localStorage entry is the *only* copy of this session until the POST
+      // succeeds. It's taken out while the POST runs, so no other chip or tab can Stop
+      // (and log) it a second time, and put back if the POST fails — unless a new timer
+      // was started meanwhile — so nothing is lost and Stop/Discard can be retried.
       async function stop() {
         const t=current();
         if(!t) return; // already logged/replaced elsewhere — posting this snapshot would double-count
@@ -1381,6 +1395,8 @@
           return;
         }
         setBusy(true);
+        clearTimer(uid);
+        const restore=()=>{ if(!getTimer(uid)) setTimer(uid,t); };
         const areaName=(categories.find(c=>c.id===t.category_id)||{}).name;
         const body={
           title: t.title || areaName || 'Session',
@@ -1401,10 +1417,11 @@
           }
           // api() resolves undefined on a 401 while it reloads to the login page — that's
           // not a save, so keep the stored timer to Stop again after signing back in.
-          if(!saved) return;
-          clearTimer(uid); setRunning(null);
+          if(!saved){ restore(); return; }
+          setRunning(getTimer(uid)); // null, or a timer started elsewhere meanwhile
           onLogged&&onLogged();
         } catch(ex) {
+          restore();
           alert('Could not log session: '+ex.message);
         } finally { setBusy(false); }
       }
@@ -1576,11 +1593,12 @@
           if(editing && editingStart){
             // Editing keeps the entry's own start (moved to the new date, same time of
             // day, if the date changed) — re-anchoring would move a real timed session,
-            // e.g. from the timer, to end at the moment of the edit. Unless that puts it
-            // in the future, where it would drop out of the log; then anchor it as below.
+            // e.g. from the timer, to end at the moment of the edit. Unless that puts its
+            // start in the future, where it would drop out of the log (which lists entries
+            // by start, so one still running stays); then anchor it as below.
             start=new Date(editingStart);
             if(form.date!==ymd(start)){ const [y,m,d]=form.date.split('-').map(Number); start.setFullYear(y,m-1,d); }
-            if(start.getTime()+mins*60000>Date.now()) start=null;
+            if(start.getTime()>Date.now()) start=null;
           }
           if(start){
             // kept from the entry being edited

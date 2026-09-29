@@ -49,7 +49,7 @@ func (h *EventHandler) Create(c *gin.Context) {
 		return
 	}
 	if len(event.Reminders) > 0 {
-		h.scheduleReminder(c, event)
+		h.scheduleReminder(c, event, nil)
 	}
 	if err := h.inviteRepo.UpsertForEvent(c.Request.Context(), event.ID, event.Attendees); err != nil {
 		log.Printf("upsert invitations for event %s: %v", event.ID, err)
@@ -231,7 +231,7 @@ func (h *EventHandler) updateEvent(c *gin.Context, id, ownerID uuid.UUID, req mo
 		log.Printf("cancel reminder %s: %v", id, err)
 	}
 	if len(event.Reminders) > 0 {
-		h.scheduleReminder(c, event)
+		h.scheduleReminder(c, event, before)
 	}
 	// Invite only attendees this edit added. The rest were invited when they were added
 	// — or deliberately weren't, like the attendees of an imported event, which a
@@ -360,6 +360,12 @@ func (h *EventHandler) UpdateRecurrence(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
+	// The modal sends every field, filled in from the occurrence opened. A series-wide
+	// edit applies only what differs from it: a past occurrence keeps details that later
+	// series edits changed, and sending those back would revert them.
+	if req.Scope != "this" {
+		dropUnchanged(&req, instance)
+	}
 
 	switch req.Scope {
 	case "this":
@@ -368,6 +374,41 @@ func (h *EventHandler) UpdateRecurrence(c *gin.Context) {
 		h.updateRecurrenceThisAndFollowing(c, ownerID, *instance.RecurringEventID, instance.StartTime, req)
 	case "all":
 		h.updateRecurrenceAll(c, ownerID, *instance.RecurringEventID, instance.StartTime, req)
+	}
+}
+
+// dropUnchanged clears the fields of req that inst already has. Start and end go
+// together: a new start with the old end is a new duration.
+func dropUnchanged(req *model.UpdateRecurrenceRequest, inst *model.Event) {
+	if req.Title != nil && *req.Title == inst.Title {
+		req.Title = nil
+	}
+	if req.Description != nil && *req.Description == inst.Description {
+		req.Description = nil
+	}
+	if req.Location != nil && *req.Location == inst.Location {
+		req.Location = nil
+	}
+	if (req.StartTime == nil || req.StartTime.Equal(inst.StartTime)) && (req.EndTime == nil || req.EndTime.Equal(inst.EndTime)) {
+		req.StartTime, req.EndTime = nil, nil
+	}
+	if req.Attendees != nil && slices.Equal(req.Attendees, inst.Attendees) {
+		req.Attendees = nil
+	}
+	if req.Reminders != nil && slices.Equal(req.Reminders, inst.Reminders) {
+		req.Reminders = nil
+	}
+	if req.AllDay != nil && *req.AllDay == inst.AllDay {
+		req.AllDay = nil
+	}
+	if req.Timezone != nil && *req.Timezone == inst.Timezone {
+		req.Timezone = nil
+	}
+	if req.CategoryID != nil && sameCategory(req.CategoryID, inst.CategoryID) {
+		req.CategoryID = nil
+	}
+	if req.Visibility != nil && *req.Visibility == inst.Visibility {
+		req.Visibility = nil
 	}
 }
 
@@ -419,6 +460,10 @@ func (h *EventHandler) updateRecurrenceAll(c *gin.Context, ownerID, recurringEve
 	rec, err := h.recurringRepo.UpdateAll(c.Request.Context(), recurringEventID, ownerID, instanceStartTime, req)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "recurring series not found"})
+		return
+	}
+	if err == repository.ErrShortenedMonthOccurrence {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	if err != nil {
@@ -537,9 +582,15 @@ func parseRange(c *gin.Context) (from, to *time.Time, ok bool) {
 	return from, to, true
 }
 
-func (h *EventHandler) scheduleReminder(c *gin.Context, event *model.Event) {
+// scheduleReminder queues event's reminders. before is the event as it was before an edit
+// (nil on create): a reminder still to come then, which the edit moved into the past, is
+// sent now rather than never — Cancel has just removed it unsent.
+func (h *EventHandler) scheduleReminder(c *gin.Context, event, before *model.Event) {
+	now := time.Now()
 	jobs := make([]queue.ReminderJob, 0, len(event.Reminders))
 	for _, r := range event.Reminders {
+		late := before != nil && before.StartTime.Add(-time.Duration(r.Minutes)*time.Minute).After(now) &&
+			slices.ContainsFunc(before.Reminders, func(b model.Reminder) bool { return b.Minutes == r.Minutes })
 		jobs = append(jobs, queue.ReminderJob{
 			EventID:   event.ID,
 			Minutes:   r.Minutes,
@@ -547,6 +598,7 @@ func (h *EventHandler) scheduleReminder(c *gin.Context, event *model.Event) {
 			Title:     event.Title,
 			StartTime: event.StartTime,
 			Attendees: event.Attendees,
+			Late:      late,
 		})
 	}
 	if err := h.queue.Schedule(c.Request.Context(), jobs); err != nil {

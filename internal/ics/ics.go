@@ -114,6 +114,9 @@ func buildRrule(rec model.RecurringEvent) string {
 			parts = append(parts, "BYDAY="+strings.Join(days, ","))
 		}
 	}
+	if ws := rec.WeekStart; ws != nil && *ws >= 0 && *ws < 7 && *ws != int(time.Monday) {
+		parts = append(parts, "WKST="+weekdayNames[*ws])
+	}
 	// COUNT takes precedence over UNTIL if both are set
 	if rec.MaxOccurrences != nil {
 		parts = append(parts, "COUNT="+strconv.Itoa(*rec.MaxOccurrences))
@@ -325,6 +328,10 @@ func parseRrule(
 			}
 		}
 	}
+	var weekStart *int // Monday, RFC 5545's default, unless WKST says otherwise
+	if n, ok := weekdayByName[strings.ToUpper(params["WKST"])]; ok && n != int(time.Monday) {
+		weekStart = &n
+	}
 
 	var endDate *time.Time
 	if until := params["UNTIL"]; until != "" {
@@ -381,5 +388,6 @@ func parseRrule(
 		AllDay:         allDay,
 		Timezone:       tz,
 		Exdates:        exdates,
+		WeekStart:      weekStart,
 	}, nil
 }

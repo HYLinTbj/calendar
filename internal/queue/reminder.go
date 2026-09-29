@@ -21,6 +21,10 @@ type ReminderJob struct {
 	// so far, and who still hasn't been sent it (nil = everyone).
 	Attempts int      `json:"attempts,omitempty"`
 	Pending  []string `json:"pending,omitempty"`
+	// Late marks a reminder that hadn't gone out yet when an edit moved its send time
+	// into the past (the event moved earlier): Schedule sends it now, as long as the event
+	// hasn't started, instead of skipping it. Not stored.
+	Late bool `json:"-"`
 }
 
 type ReminderQueue struct {
@@ -33,13 +37,14 @@ func NewReminderQueue(rdb *redis.Client) *ReminderQueue {
 
 // Schedule enqueues one reminder per job, keyed by <event_id>:<minutes>.
 // A meta key tracks all minute-offsets so Cancel can clean them up efficiently.
-// Reminders whose send time has already passed are skipped: every edit reschedules an
-// event's reminders, and re-queuing a past one would send it again straight away.
+// Reminders whose send time has already passed are skipped, unless Late: every edit
+// reschedules an event's reminders, and re-queuing a past one would send it again
+// straight away.
 func (q *ReminderQueue) Schedule(ctx context.Context, jobs []ReminderJob) error {
 	now := time.Now()
 	var due []ReminderJob
 	for _, job := range jobs {
-		if job.StartTime.Add(-time.Duration(job.Minutes) * time.Minute).After(now) {
+		if job.StartTime.Add(-time.Duration(job.Minutes)*time.Minute).After(now) || (job.Late && job.StartTime.After(now)) {
 			due = append(due, job)
 		}
 	}

@@ -1,6 +1,7 @@
 package mailer
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -63,7 +65,7 @@ func (m *Mailer) SendReminder(to, title string, startTime time.Time) error {
 
 // Permanent reports whether retrying this message can't help: the relay rejected the
 // recipient or message outright (5xx), or the address can't be put in an SMTP command.
-// A relay refusing to relay for us (see RelayRefused) isn't about the message.
+// A refusal for the relay's own reasons (see RelayRefused) isn't about the message.
 func Permanent(err error) bool {
 	var re *RecipientError
 	if !errors.As(err, &re) || RelayRefused(err) {
@@ -76,15 +78,27 @@ func Permanent(err error) bool {
 	return strings.Contains(err.Error(), "must not contain CR or LF")
 }
 
-// RelayRefused reports whether the relay turned a recipient down because it won't relay
-// for us ("554 5.7.1 Relay access denied", or authentication required) rather than
-// because of the address. Its configuration is at fault, and it may still accept other
-// recipients (its own domains), so the send is worth retrying once that's fixed.
+// enhancedCode matches the RFC 3463 enhanced status code a reply's text starts with:
+// class.subject.detail, as in "5.1.1 <x@y>: Recipient address rejected".
+var enhancedCode = regexp.MustCompile(`^[245]\.(\d{1,3})\.(\d{1,3})\b`)
+
+// RelayRefused reports whether the relay turned a recipient or message down for reasons
+// of its own rather than because of the address or message: its policy ("554 5.7.1
+// Relay access denied", a client or sender restriction Postfix reports at RCPT,
+// authentication required), our sender address (X.1.7, X.1.8), or its own system,
+// routing or protocol state (X.3 to X.5). Its configuration is at fault, and it may
+// still accept other recipients (its own domains), so the send is worth retrying once
+// that's fixed. A reply without an enhanced status code is judged by its text.
 func RelayRefused(err error) bool {
 	var re *RecipientError
 	var tpErr *textproto.Error
 	if !errors.As(err, &re) || !errors.As(err, &tpErr) {
 		return false
+	}
+	if m := enhancedCode.FindStringSubmatch(tpErr.Msg); m != nil {
+		subject, detail := m[1], m[2]
+		return subject == "3" || subject == "4" || subject == "5" || subject == "7" ||
+			(subject == "1" && (detail == "7" || detail == "8"))
 	}
 	msg := strings.ToLower(tpErr.Msg)
 	return tpErr.Code == 530 || strings.Contains(msg, "relay") || strings.Contains(msg, "authenticat")
@@ -102,6 +116,8 @@ func (m *Mailer) send(to, subject, body string) error {
 	msg := "From: " + m.from + "\r\n" +
 		"To: " + oneLine(to) + "\r\n" +
 		"Subject: " + encodeSubject(subject) + "\r\n" +
+		"Date: " + time.Now().Format(time.RFC1123Z) + "\r\n" +
+		"Message-ID: " + messageID(m.from) + "\r\n" +
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: text/plain; charset=utf-8\r\n" +
 		"Content-Transfer-Encoding: 8bit\r\n" +
@@ -147,6 +163,20 @@ func (m *Mailer) send(to, subject, body string) error {
 	// would get the message sent again.
 	_ = c.Quit()
 	return nil
+}
+
+// messageID makes a unique Message-ID in from's domain. Relays add a missing one only
+// for their local clients, and some destinations (Gmail) reject mail without one.
+func messageID(from string) string {
+	domain := "localhost"
+	if i := strings.LastIndex(from, "@"); i >= 0 {
+		if d := strings.Trim(from[i+1:], "<> "); d != "" {
+			domain = d
+		}
+	}
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("<%x@%s>", b, domain)
 }
 
 // encodeSubject makes subject a safe header value: one line, capped at maxSubjectRunes,

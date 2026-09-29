@@ -37,6 +37,10 @@ type RecurringEvent struct {
 	SendInvitations bool `json:"-"`
 	// Visibility ("public" | "private") is given to every occurrence.
 	Visibility string `json:"visibility"`
+	// WeekStart is the weekday (Sun=0 … Sat=6) a weekly series' weeks start on, which
+	// decides which of its days go together when it repeats every 2+ weeks. nil means
+	// Monday, as in RFC 5545.
+	WeekStart *int `json:"week_start"`
 }
 
 type CreateRecurringEventRequest struct {
@@ -61,6 +65,7 @@ type CreateRecurringEventRequest struct {
 	// NoInvitations: see RecurringEvent.SendInvitations. Set by ICS import only.
 	NoInvitations bool   `json:"-"`
 	Visibility    string `json:"visibility" binding:"omitempty,oneof=public private"`
+	WeekStart     *int   `json:"week_start" binding:"omitempty,min=0,max=6"`
 }
 
 type UpdateRecurringEventRequest struct {
@@ -81,6 +86,8 @@ type UpdateRecurringEventRequest struct {
 	Timezone       *string    `json:"timezone"`
 	CategoryID     *uuid.UUID `json:"category_id"`
 	Visibility     *string    `json:"visibility" binding:"omitempty,oneof=public private"`
+	// WeekStart moves along with DaysOfWeek (UpdateAll); not settable through the API.
+	WeekStart *int `json:"-"`
 }
 
 // UpdateRecurrenceRequest is used by PUT /events/:id/recurrence to edit one instance,

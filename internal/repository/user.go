@@ -28,7 +28,9 @@ func (r *UserRepository) Create(ctx context.Context, username, email, passwordHa
 	return &u, err
 }
 
-// GetByEmail returns the user and their stored password hash for login.
+// GetByEmail returns the user and their stored password hash for login. email matches
+// regardless of case; pass it as given, not lowercased, so that of legacy accounts
+// differing only in case (see Migrate) the one matching exactly is found.
 func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*model.User, string, error) {
 	var u model.User
 	var hash string

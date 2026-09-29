@@ -40,7 +40,7 @@ func NewRecurringEventRepository(pool *pgxpool.Pool) *RecurringEventRepository {
 const recurringCols = `id, owner_id, calendar_id, title, description, location, duration,
 	attendees, reminders, frequency, interval, days_of_week,
 	end_date, max_occurrences, all_day, timezone, category_id, start_time, generated_until, created_at, updated_at, exdates,
-	send_invitations, visibility`
+	send_invitations, visibility, week_start`
 
 func scanRecurring(row interface{ Scan(...any) error }, r *model.RecurringEvent) error {
 	var remindersRaw []byte
@@ -48,7 +48,7 @@ func scanRecurring(row interface{ Scan(...any) error }, r *model.RecurringEvent)
 		&r.ID, &r.OwnerID, &r.CalendarID, &r.Title, &r.Description, &r.Location, &r.Duration,
 		&r.Attendees, &remindersRaw, &r.Frequency, &r.Interval, &r.DaysOfWeek,
 		&r.EndDate, &r.MaxOccurrences, &r.AllDay, &r.Timezone, &r.CategoryID, &r.StartTime, &r.GeneratedUntil, &r.CreatedAt, &r.UpdatedAt,
-		&r.Exdates, &r.SendInvitations, &r.Visibility,
+		&r.Exdates, &r.SendInvitations, &r.Visibility, &r.WeekStart,
 	)
 	if err != nil {
 		return err
@@ -96,15 +96,15 @@ func (r *RecurringEventRepository) Create(ctx context.Context, ownerID, calendar
 			(owner_id, calendar_id, title, description, location, duration,
 			 attendees, reminders, frequency, interval, days_of_week,
 			 end_date, max_occurrences, all_day, timezone, category_id, start_time, generated_until, exdates,
-			 send_invitations, visibility)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+			 send_invitations, visibility, week_start)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 		RETURNING `+recurringCols,
 		ownerID, calendarID, req.Title, req.Description, req.Location,
 		durationNs, req.Attendees, remindersJSON,
 		req.Frequency, req.Interval, req.DaysOfWeek,
 		req.EndDate, req.MaxOccurrences, req.AllDay, tz, req.CategoryID,
 		req.StartTime, initialCursor, req.Exdates,
-		!req.NoInvitations, req.Visibility,
+		!req.NoInvitations, req.Visibility, req.WeekStart,
 	), &rec)
 	if err != nil {
 		return nil, err
@@ -166,8 +166,33 @@ func (r *RecurringEventRepository) ListByCalendar(ctx context.Context, ownerID, 
 	return results, rows.Err()
 }
 
+// lockByID is GetByID, also locking the series' row until the transaction ends.
+func (r *RecurringEventRepository) lockByID(ctx context.Context, id, ownerID uuid.UUID) (*model.RecurringEvent, error) {
+	var rec model.RecurringEvent
+	err := scanRecurring(r.pool.QueryRow(ctx,
+		`SELECT `+recurringCols+` FROM recurring_events WHERE id=$1 AND owner_id=$2 FOR UPDATE`, id, ownerID,
+	), &rec)
+	return &rec, err
+}
+
+// Update applies req to the series. It's one transaction holding the series' row:
+// failing part-way would leave its future instances deleted but not regenerated, and an
+// exdate added meanwhile (a single occurrence edited or deleted) would be overwritten.
 func (r *RecurringEventRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req model.UpdateRecurringEventRequest) (*model.RecurringEvent, error) {
-	rec, err := r.GetByID(ctx, id, ownerID)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rec, err := (&RecurringEventRepository{pool: tx}).update(ctx, id, ownerID, req)
+	if err != nil {
+		return nil, err
+	}
+	return rec, tx.Commit(ctx)
+}
+
+func (r *RecurringEventRepository) update(ctx context.Context, id, ownerID uuid.UUID, req model.UpdateRecurringEventRequest) (*model.RecurringEvent, error) {
+	rec, err := r.lockByID(ctx, id, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +248,9 @@ func (r *RecurringEventRepository) Update(ctx context.Context, id, ownerID uuid.
 	if req.Visibility != nil {
 		rec.Visibility = *req.Visibility
 	}
+	if req.WeekStart != nil {
+		rec.WeekStart = req.WeekStart
+	}
 	// Keep exclusions on the occurrences they belong to. With the same pattern, an edit
 	// that moves the anchor (or toggles all-day, or changes zone) moves every occurrence,
 	// so carry each exclusion to the occurrence at the same position; so does one moving
@@ -241,7 +269,8 @@ func (r *RecurringEventRepository) Update(ctx context.Context, id, ownerID uuid.
 	// deletes and regenerates them.
 	inPlace := remap && slices.Equal(old.DaysOfWeek, rec.DaysOfWeek) && old.StartTime.Equal(rec.StartTime) &&
 		old.Duration == rec.Duration && old.AllDay == rec.AllDay && old.Timezone == rec.Timezone &&
-		sameTime(old.EndDate, rec.EndDate) && sameInt(old.MaxOccurrences, rec.MaxOccurrences)
+		sameTime(old.EndDate, rec.EndDate) && sameInt(old.MaxOccurrences, rec.MaxOccurrences) &&
+		sameInt(old.WeekStart, rec.WeekStart)
 
 	// Microseconds, as stored: the DELETE below and the count of instances it keeps
 	// must agree on which instances start by now.
@@ -261,6 +290,11 @@ func (r *RecurringEventRepository) Update(ctx context.Context, id, ownerID uuid.
 			return nil, err
 		}
 	}
+	// A series moved past the window generates nothing yet, but generation must still
+	// resume at from: the occurrences before it are the kept past instances.
+	if from.After(horizon) {
+		horizon = from
+	}
 
 	err = scanRecurring(r.pool.QueryRow(ctx, `
 		UPDATE recurring_events
@@ -268,14 +302,14 @@ func (r *RecurringEventRepository) Update(ctx context.Context, id, ownerID uuid.
 		    start_time=$5, duration=$6,
 		    attendees=$7, reminders=$8, frequency=$9, interval=$10,
 		    days_of_week=$11, end_date=$12, max_occurrences=$13, all_day=$14, timezone=$15, category_id=$16,
-		    generated_until=$17, exdates=$20, visibility=$21, updated_at=NOW()
+		    generated_until=$17, exdates=$20, visibility=$21, week_start=$22, updated_at=NOW()
 		WHERE id=$18 AND owner_id=$19
 		RETURNING `+recurringCols,
 		rec.CalendarID, rec.Title, rec.Description, rec.Location,
 		rec.StartTime, rec.Duration,
 		rec.Attendees, marshalReminders(rec.Reminders), rec.Frequency, rec.Interval,
 		rec.DaysOfWeek, rec.EndDate, rec.MaxOccurrences, rec.AllDay, rec.Timezone, rec.CategoryID,
-		now, id, ownerID, rec.Exdates, rec.Visibility,
+		now, id, ownerID, rec.Exdates, rec.Visibility, rec.WeekStart,
 	), rec)
 	if err != nil {
 		return nil, err
@@ -429,11 +463,11 @@ func (r *RecurringEventRepository) splitAt(ctx context.Context, recurringEventID
 	before := occurrencesBefore(parent, pivot)
 	forkRule := model.RecurringEvent{
 		StartTime: newStart, Frequency: parent.Frequency, Interval: parent.Interval,
-		DaysOfWeek: parent.DaysOfWeek, AllDay: newAllDay, Timezone: newTZ,
+		DaysOfWeek: parent.DaysOfWeek, AllDay: newAllDay, Timezone: newTZ, WeekStart: parent.WeekStart,
 	}
 	// An occurrence moved to another weekday takes the series' weekdays along.
 	if days := dayShift(parent, &forkRule, pivot, newStart); days%7 != 0 && len(parent.DaysOfWeek) > 0 {
-		forkRule.DaysOfWeek = rotateWeekdays(parent.DaysOfWeek, days)
+		forkRule.DaysOfWeek, forkRule.WeekStart = rotateWeekdays(parent.DaysOfWeek, days), rotateWeekStart(parent, days)
 	}
 	duration := time.Duration(parent.Duration)
 	newEnd := newStart.Add(duration)
@@ -461,6 +495,7 @@ func (r *RecurringEventRepository) splitAt(ctx context.Context, recurringEventID
 		Exdates:        remapExdates(parent, &forkRule, before),
 		NoInvitations:  !parent.SendInvitations,
 		Visibility:     newVisibility,
+		WeekStart:      forkRule.WeekStart,
 	}
 
 	// The parent's instances from pivot on are regenerated by the new series.
@@ -492,9 +527,22 @@ func (r *RecurringEventRepository) splitAt(ctx context.Context, recurringEventID
 
 // TruncateAt ends a series just before pivot: instances from pivot on are deleted and
 // no more are generated, while earlier ones (possibly already-logged time) are kept.
-// Used for "this and following" deletes.
+// Used for "this and following" deletes. One transaction, like Update: failing between
+// the delete and ending the series would let it regenerate after the gap.
 func (r *RecurringEventRepository) TruncateAt(ctx context.Context, recurringEventID, ownerID uuid.UUID, pivot time.Time) error {
-	parent, err := r.GetByID(ctx, recurringEventID, ownerID)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := (&RecurringEventRepository{pool: tx}).truncateAt(ctx, recurringEventID, ownerID, pivot); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *RecurringEventRepository) truncateAt(ctx context.Context, recurringEventID, ownerID uuid.UUID, pivot time.Time) error {
+	parent, err := r.lockByID(ctx, recurringEventID, ownerID)
 	if err != nil {
 		return err
 	}
@@ -557,19 +605,20 @@ func (r *RecurringEventRepository) ExtendThrough(ctx context.Context, userID uui
 // its occurrence time, so a later series-wide edit deleted it and regenerated the
 // original occurrence. Each one is detached as an exception of its series, with its
 // occurrence excluded. They're told apart by updated_at > created_at, which only holds
-// for data from back then. So it runs once, at the first api startup after the change,
-// and records that in maintenance_runs; later ones skip it. Returns how many instances
-// it repaired.
+// for data from back then. Occurrences deleted back then (no exdate was recorded), or
+// detached by an edit that kept no link, are excluded too. So it runs once, at the first
+// api startup after the change, and records that in maintenance_runs; later ones skip
+// it. Returns how many instances it repaired.
 func (r *RecurringEventRepository) RepairLegacyExceptions(ctx context.Context) (int, error) {
-	const run = "repair_legacy_exceptions"
+	// v2: the first version left deleted occurrences to be regenerated, and detached
+	// instances that had only been re-saved.
+	const run = "repair_legacy_exceptions_v2"
 	var done bool
 	if err := r.pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM maintenance_runs WHERE name = $1)`, run).Scan(&done); err != nil || done {
 		return 0, err
 	}
-	rows, err := r.pool.Query(ctx, `
-		SELECT DISTINCT recurring_event_id FROM events
-		WHERE recurring_event_id IS NOT NULL AND updated_at > created_at`)
+	rows, err := r.pool.Query(ctx, `SELECT id FROM recurring_events`)
 	if err != nil {
 		return 0, err
 	}
@@ -616,23 +665,23 @@ func (r *RecurringEventRepository) repairSeries(ctx context.Context, id uuid.UUI
 		return 0, err
 	}
 	type instance struct {
-		id     uuid.UUID
-		start  time.Time
-		edited bool
+		id           uuid.UUID
+		start        time.Time
+		edited, same bool // saved since it was generated; still has the series' details
 	}
 	rows, err := tx.Query(ctx,
-		`SELECT id, start_time, updated_at > created_at FROM events WHERE recurring_event_id = $1 ORDER BY start_time`, id)
+		`SELECT `+eventCols+` FROM events WHERE recurring_event_id = $1 ORDER BY start_time`, id)
 	if err != nil {
 		return 0, err
 	}
 	var insts []instance
 	for rows.Next() {
-		var in instance
-		if err := rows.Scan(&in.id, &in.start, &in.edited); err != nil {
+		var e model.Event
+		if err := scanEvent(rows, &e); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		insts = append(insts, in)
+		insts = append(insts, instance{e.ID, e.StartTime, e.UpdatedAt.After(e.CreatedAt), matchesSeries(&e, &rec)})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -662,7 +711,9 @@ func (r *RecurringEventRepository) repairSeries(ctx context.Context, id uuid.UUI
 	}
 	repaired := 0
 	for _, in := range insts {
-		if !in.edited {
+		// One saved without a change (the old modal's Save, a drag back to where it was)
+		// wasn't edited.
+		if !in.edited || (in.same && isSlot[in.start.UnixMicro()]) {
 			continue
 		}
 		original, found := in.start, isSlot[in.start.UnixMicro()]
@@ -692,11 +743,31 @@ func (r *RecurringEventRepository) repairSeries(ctx context.Context, id uuid.UUI
 		}
 		repaired++
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE recurring_events SET exdates = $1 WHERE id = $2`, exdates, id); err != nil {
-		return 0, err
+	// An occurrence generated but left without an instance was deleted, or detached by an
+	// edit that kept no link: exclude it, or the next series-wide edit brings it back.
+	for _, t := range slots {
+		if !occupied[t.UnixMicro()] && !excluded[t.UnixMicro()] {
+			exdates = append(exdates, t)
+			excluded[t.UnixMicro()] = true
+		}
+	}
+	if len(exdates) > len(rec.Exdates) {
+		if _, err := tx.Exec(ctx,
+			`UPDATE recurring_events SET exdates = $1 WHERE id = $2`, exdates, id); err != nil {
+			return 0, err
+		}
 	}
 	return repaired, tx.Commit(ctx)
+}
+
+// matchesSeries reports whether e still has the details rec gives its occurrences.
+func matchesSeries(e *model.Event, rec *model.RecurringEvent) bool {
+	return e.CalendarID == rec.CalendarID && e.Title == rec.Title && e.Description == rec.Description &&
+		e.Location == rec.Location && e.EndTime.Sub(e.StartTime) == time.Duration(rec.Duration).Truncate(time.Microsecond) &&
+		slices.Equal(e.Attendees, rec.Attendees) && slices.Equal(e.Reminders, rec.Reminders) &&
+		e.AllDay == rec.AllDay && e.Timezone == rec.Timezone && e.Visibility == rec.Visibility &&
+		((e.CategoryID == nil && rec.CategoryID == nil) ||
+			(e.CategoryID != nil && rec.CategoryID != nil && *e.CategoryID == *rec.CategoryID))
 }
 
 // endSeries stops rec generating from pivot on, once its instances from pivot on have
@@ -787,7 +858,13 @@ func (r *RecurringEventRepository) UpdateAll(ctx context.Context, recurringEvent
 		days := dayShift(parent, &moved, instanceStartTime, newInstStart)
 		moved.StartTime = movedAnchor(parent, &moved, days, newInstStart)
 		if days%7 != 0 && len(parent.DaysOfWeek) > 0 {
-			moved.DaysOfWeek = rotateWeekdays(parent.DaysOfWeek, days)
+			moved.DaysOfWeek, moved.WeekStart = rotateWeekdays(parent.DaysOfWeek, days), rotateWeekStart(parent, days)
+		}
+		// Moving the anchor moves every occurrence alike, except one cut short to fit its
+		// month (Feb 28 of a series on the 31st), which may not move where it was put.
+		if n := occurrencesBefore(parent, instanceStartTime) + 1; days != 0 &&
+			(parent.Frequency == "monthly" || parent.Frequency == "yearly") && !occurrenceAt(&moved, n).Equal(newInstStart) {
+			return nil, ErrShortenedMonthOccurrence
 		}
 	}
 	updateReq := model.UpdateRecurringEventRequest{
@@ -810,6 +887,9 @@ func (r *RecurringEventRepository) UpdateAll(ctx context.Context, recurringEvent
 		updateReq.StartTime = &moved.StartTime
 		if !slices.Equal(moved.DaysOfWeek, parent.DaysOfWeek) {
 			updateReq.DaysOfWeek = moved.DaysOfWeek
+		}
+		if !sameInt(moved.WeekStart, parent.WeekStart) {
+			updateReq.WeekStart = moved.WeekStart
 		}
 	}
 	if req.EndTime != nil {
@@ -1080,6 +1160,26 @@ func movedAnchor(from, to *model.RecurringEvent, days int, newInst time.Time) ti
 	return time.Date(a.Year(), a.Month(), a.Day()+days, n.Hour(), n.Minute(), n.Second(), n.Nanosecond(), loc).UTC()
 }
 
+// ErrShortenedMonthOccurrence is returned by UpdateAll for a move of an occurrence that
+// was cut short to fit its month: moving the series' anchor wouldn't move it alike.
+var ErrShortenedMonthOccurrence = errors.New("this occurrence was moved to fit a shorter month, so the whole series can't be moved with it: move another occurrence, or just this one")
+
+// weekStart is the weekday rec's weeks start on (Sun=0 … Sat=6): Monday, as in RFC
+// 5545, unless set. It decides which days of a weekly series every 2+ weeks go together.
+func weekStart(rec *model.RecurringEvent) int {
+	if rec.WeekStart != nil {
+		return *rec.WeekStart
+	}
+	return int(time.Monday)
+}
+
+// rotateWeekStart moves rec's week start delta days along the week, as rotateWeekdays
+// moves its days, so each day stays in the week it was in.
+func rotateWeekStart(rec *model.RecurringEvent, delta int) *int {
+	ws := ((weekStart(rec)+delta)%7 + 7) % 7
+	return &ws
+}
+
 // rotateWeekdays moves each of days (Sun=0 … Sat=6) delta days along the week, sorted.
 func rotateWeekdays(days []int, delta int) []int {
 	out := make([]int, len(days))
@@ -1145,7 +1245,7 @@ func nextOccurrences(rec *model.RecurringEvent, from, until time.Time) []time.Ti
 
 // step advances t by one recurrence interval, reconstructing the wall-clock time
 // in loc so that DST transitions don't shift the displayed hour. Weekly steps with
-// explicit days honor Interval by skipping whole weeks (WKST = Monday). Monthly and
+// explicit days honor Interval by skipping whole weeks (WKST = weekStart). Monthly and
 // yearly steps anchor on StartTime's day-of-month and clamp to the last valid day of
 // the target month, so e.g. monthly-on-31 lands on Feb 29 (and Feb 29 yearly → Feb 28).
 func step(rec *model.RecurringEvent, t time.Time, loc *time.Location, h, m, s, ns int) time.Time {
@@ -1169,15 +1269,15 @@ func step(rec *model.RecurringEvent, t time.Time, loc *time.Location, h, m, s, n
 		if len(rec.DaysOfWeek) == 0 {
 			return rebuild(local.AddDate(0, 0, 7*n))
 		}
-		// A later matching day in the current week (WKST = Monday) comes first.
-		isoDow := (int(local.Weekday()) + 6) % 7 // Mon=0 … Sun=6
-		for off := 1; off <= 6-isoDow; off++ {
+		// A later matching day in the current week comes first.
+		pos := (int(local.Weekday()) - weekStart(rec) + 7) % 7 // days since the week started
+		for off := 1; off <= 6-pos; off++ {
 			if c := local.AddDate(0, 0, off); matches(c) {
 				return rebuild(c)
 			}
 		}
 		// Otherwise skip Interval whole weeks and take the first matching day.
-		nextWeek := local.AddDate(0, 0, -isoDow+7*n)
+		nextWeek := local.AddDate(0, 0, -pos+7*n)
 		for off := 0; off <= 6; off++ {
 			if c := nextWeek.AddDate(0, 0, off); matches(c) {
 				return rebuild(c)

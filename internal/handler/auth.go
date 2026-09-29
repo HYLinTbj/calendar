@@ -63,6 +63,12 @@ func normalizeEmail(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
+// lookupEmail is how an email is looked up: GetByEmail matches it case-insensitively, but
+// needs its case to pick the exact match among legacy accounts differing only in case.
+func lookupEmail(s string) string {
+	return strings.TrimSpace(s)
+}
+
 // issueToken signs a login token for user u, valid for 24h and until their password
 // next changes (TokenVersion).
 func issueToken(u *model.User) (string, error) {
@@ -95,7 +101,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	user, hash, err := h.userRepo.GetByEmail(c.Request.Context(), normalizeEmail(req.Email))
+	user, hash, err := h.userRepo.GetByEmail(c.Request.Context(), lookupEmail(req.Email))
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return

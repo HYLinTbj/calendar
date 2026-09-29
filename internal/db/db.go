@@ -244,6 +244,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		ALTER TABLE recurring_events
 			ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'public';
 
+		-- The weekday (Sun=0 … Sat=6) a weekly series' weeks start on; NULL is Monday.
+		ALTER TABLE recurring_events
+			ADD COLUMN IF NOT EXISTS week_start SMALLINT;
+
 		-- Login tokens carry the user's token_version; a password change bumps it, which
 		-- signs out every session issued with the old password.
 		ALTER TABLE users
