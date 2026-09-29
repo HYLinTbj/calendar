@@ -28,7 +28,7 @@ func (h *CategoryHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !normalizeCodeField(c, &req.Code, true) {
+	if !rejectBlank(c, &req.Name, &req.Color) || !normalizeCodeField(c, &req.Code) {
 		return
 	}
 	if !validateGroupOwnership(c, h.groupRepo, ownerID, req.GroupID) {
@@ -87,7 +87,7 @@ func (h *CategoryHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !normalizeCodeField(c, req.Code, false) {
+	if !rejectBlank(c, req.Name, req.Color) || !normalizeCodeField(c, req.Code) {
 		return
 	}
 	if req.GroupID.Set && !validateGroupOwnership(c, h.groupRepo, ownerID, req.GroupID.Value) {

@@ -26,6 +26,9 @@ func (h *CategoryGroupHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !rejectBlank(c, &req.Name, &req.Color) {
+		return
+	}
 	g, err := h.repo.Create(c.Request.Context(), ownerID, req)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -77,6 +80,9 @@ func (h *CategoryGroupHandler) Update(c *gin.Context) {
 	var req model.UpdateCategoryGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !rejectBlank(c, req.Name, req.Color) {
 		return
 	}
 	g, err := h.repo.Update(c.Request.Context(), id, ownerID, req)

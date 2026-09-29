@@ -2,13 +2,13 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
 	"github.com/hylin/calendar/internal/repository"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // validateCategoryOwnership checks that a requested category (a.k.a. Area) exists
@@ -53,10 +53,14 @@ func validateGroupOwnership(c *gin.Context, groupRepo *repository.CategoryGroupR
 }
 
 // normalizeCodeField validates an optional caller-supplied Area code in place.
-// An empty code on create means "derive one"; on update a present field must be
-// valid. On failure it writes a 400 and returns false.
-func normalizeCodeField(c *gin.Context, code *string, allowEmpty bool) bool {
-	if code == nil || (allowEmpty && *code == "") {
+// A blank code is left empty, which means "derive one from the name" (on create
+// and update alike). On failure it writes a 400 and returns false.
+func normalizeCodeField(c *gin.Context, code *string) bool {
+	if code == nil {
+		return true
+	}
+	if strings.TrimSpace(*code) == "" {
+		*code = ""
 		return true
 	}
 	norm, ok := model.NormalizeCategoryCode(*code)
@@ -68,9 +72,21 @@ func normalizeCodeField(c *gin.Context, code *string, allowEmpty bool) bool {
 	return true
 }
 
+// rejectBlank writes a 400 and returns false if name or color (both required on
+// create) is empty or whitespace. A nil one, absent from an update, passes.
+func rejectBlank(c *gin.Context, name, color *string) bool {
+	for field, v := range map[string]*string{"name": name, "color": color} {
+		if v != nil && strings.TrimSpace(*v) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": field + " must not be blank"})
+			return false
+		}
+	}
+	return true
+}
+
 // categoryConflictMessage names which per-owner uniqueness rule a 23505 hit.
 func categoryConflictMessage(err error) string {
-	if pgErr, ok := err.(*pgconn.PgError); ok && pgErr.ConstraintName == "categories_owner_code_uniq" {
+	if repository.IsCategoryCodeConflict(err) {
 		return "category code already exists"
 	}
 	return "category name already exists"

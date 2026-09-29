@@ -35,7 +35,8 @@ type UpdateCategoryRequest struct {
 	WeeklyTargetMinutes *int    `json:"weekly_target_minutes"`
 	// GroupID is Optional so an explicit null ungroups the Area; an absent
 	// field keeps the current group.
-	GroupID  Optional[uuid.UUID] `json:"group_id"`
-	Code     *string             `json:"code"`
-	Position *int                `json:"position"`
+	GroupID Optional[uuid.UUID] `json:"group_id"`
+	// Code, when set but empty, is derived again from the (updated) name.
+	Code     *string `json:"code"`
+	Position *int    `json:"position"`
 }

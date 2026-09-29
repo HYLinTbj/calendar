@@ -1359,8 +1359,13 @@
         setHiddenAreas(h=>{ const n=new Set(h); ids.forEach(id=>hide?n.add(id):n.delete(id)); saveHiddenAreas(n); return n; });
       }
 
-      const visible = events.filter(e=>selCals.has(e.calendar_id) && !hiddenAreas.has(e.category_id||'none'));
-      const eventDays = React.useMemo(()=>new Set(events.flatMap(dayKeys)),[events]);
+      // An event tagged with someone else's Area (in a shared calendar) has none of
+      // ours: it's coloured by its calendar, so it's shown and hidden with "No area".
+      const visible = React.useMemo(()=>{
+        const mine=new Set(cats.map(c=>c.id));
+        return events.filter(e=>selCals.has(e.calendar_id) && !hiddenAreas.has(mine.has(e.category_id)?e.category_id:'none'));
+      },[events,selCals,hiddenAreas,cats]);
+      const eventDays = React.useMemo(()=>new Set(visible.flatMap(dayKeys)),[visible]);
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
@@ -1992,10 +1997,10 @@
         setBusy(true); setErr('');
         try {
           const weekly=Math.round(parseFloat(hours||'0')*60);
-          // Explicit null ungroups on edit. An empty code on create lets the
-          // server derive one from the name; on edit an empty code keeps the old one.
+          // Explicit null ungroups on edit. An empty code has the server derive one
+          // from the name, on edit too.
           const body={ name:name.trim(), color, weekly_target_minutes:weekly, group_id:groupId||null };
-          if(code.trim()) body.code=code.trim();
+          body.code=code.trim();
           const saved = isEdit
             ? await api(`/categories/${area.id}`,{method:'PUT',body:JSON.stringify(body)})
             : await api('/categories',{method:'POST',body:JSON.stringify(body)});

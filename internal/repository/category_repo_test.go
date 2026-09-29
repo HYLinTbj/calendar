@@ -4,6 +4,8 @@ package repository_test
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/hylin/calendar/internal/model"
@@ -37,6 +39,42 @@ func TestCategoryRepository_Create_UniquePerOwner(t *testing.T) {
 	// Same name for same owner should fail
 	_, err = r.Create(ctx, user.ID, model.CreateCategoryRequest{Name: "Work", Color: "#00FF00"})
 	assert.Error(t, err, "duplicate category name for same owner should fail")
+}
+
+// Concurrent creates that derive the same code must each end up with a distinct
+// one, not fail on the unique index.
+func TestCategoryRepository_Create_ConcurrentDerivedCodes(t *testing.T) {
+	truncateAll(t, testPool)
+	user := seedUser(t, testPool, "cat_race")
+	r := repository.NewCategoryRepository(testPool)
+	ctx := context.Background()
+
+	const n = 8
+	start := make(chan struct{})
+	codes := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			cat, err := r.Create(ctx, user.ID, model.CreateCategoryRequest{Name: fmt.Sprintf("Chess %d", i), Color: "#FF0000"})
+			errs[i] = err
+			if err == nil {
+				codes[i] = cat.Code
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for i := range n {
+		require.NoError(t, errs[i], "create %d", i)
+		assert.False(t, seen[codes[i]], "code %q assigned twice", codes[i])
+		seen[codes[i]] = true
+	}
 }
 
 func TestCategoryRepository_Create_SameNameDifferentOwner(t *testing.T) {

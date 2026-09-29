@@ -181,14 +181,24 @@ func TestCategoryHandler_Codes(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, code, body)
 	assert.Contains(t, body, "code")
 
-	// Update: rename the code, reject a taken one, reject an empty one.
+	// Update: rename the code, reject a taken one; an empty one is derived again.
 	wUpd := Do(t, testRouter, "PUT", fmt.Sprintf("/categories/%s", cl.ID), token, map[string]any{"code": "cb"})
 	require.Equal(t, http.StatusOK, wUpd.Code, wUpd.Body.String())
 	assert.Equal(t, "CB", decodeCategory(t, wUpd.Body.Bytes()).Code)
 	wTaken := Do(t, testRouter, "PUT", fmt.Sprintf("/categories/%s", cl.ID), token, map[string]any{"code": "CA"})
 	assert.Equal(t, http.StatusConflict, wTaken.Code, wTaken.Body.String())
-	wEmpty := Do(t, testRouter, "PUT", fmt.Sprintf("/categories/%s", cl.ID), token, map[string]any{"code": ""})
-	assert.Equal(t, http.StatusBadRequest, wEmpty.Code, wEmpty.Body.String())
+	wEmpty := Do(t, testRouter, "PUT", fmt.Sprintf("/categories/%s", cl.ID), token, map[string]any{"code": " "})
+	require.Equal(t, http.StatusOK, wEmpty.Code, wEmpty.Body.String())
+	assert.Equal(t, "CL", decodeCategory(t, wEmpty.Body.Bytes()).Code)
+
+	// Renaming with an empty code derives it from the new name; the Area's own
+	// current code doesn't count as taken.
+	wRe := Do(t, testRouter, "PUT", fmt.Sprintf("/categories/%s", cl.ID), token, map[string]any{"name": "Cooking", "code": ""})
+	require.Equal(t, http.StatusOK, wRe.Code, wRe.Body.String())
+	assert.Equal(t, "CO", decodeCategory(t, wRe.Body.Bytes()).Code)
+	wSame := Do(t, testRouter, "PUT", fmt.Sprintf("/categories/%s", cl.ID), token, map[string]any{"code": ""})
+	require.Equal(t, http.StatusOK, wSame.Code, wSame.Body.String())
+	assert.Equal(t, "CO", decodeCategory(t, wSame.Body.Bytes()).Code)
 
 	// Codes are unique per owner, not globally.
 	_, token2 := MustRegisterAndLogin(t, testRouter, "cat_code_2")
@@ -240,4 +250,37 @@ func TestEventStats_IncludesGroup(t *testing.T) {
 	assert.Nil(t, runStat.GroupID)
 	assert.Empty(t, runStat.GroupName)
 	assert.Equal(t, 60, runStat.TotalMinutes)
+}
+
+// Name and color are required on create; an update can't blank them either.
+func TestCategoryAndGroup_RejectBlankFields(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "blank_fields")
+	cat := createCategory(t, token, "Running", 0)
+	grp := createCategoryGroup(t, token, "Health", "#1F6B5C")
+
+	for _, tc := range []struct {
+		method, path string
+		body         map[string]any
+	}{
+		{"POST", "/categories", map[string]any{"name": "  ", "color": "#000000"}},
+		{"POST", "/categories", map[string]any{"name": "Chess", "color": " "}},
+		{"PUT", "/categories/" + cat.String(), map[string]any{"name": ""}},
+		{"PUT", "/categories/" + cat.String(), map[string]any{"color": "  "}},
+		{"POST", "/category-groups", map[string]any{"name": " ", "color": "#000000"}},
+		{"PUT", "/category-groups/" + grp.String(), map[string]any{"name": ""}},
+		{"PUT", "/category-groups/" + grp.String(), map[string]any{"color": ""}},
+	} {
+		w := Do(t, testRouter, tc.method, tc.path, token, tc.body)
+		assert.Equal(t, http.StatusBadRequest, w.Code, "%s %s %v: %s", tc.method, tc.path, tc.body, w.Body.String())
+	}
+
+	// Untouched by the rejected updates.
+	wC := Do(t, testRouter, "GET", "/categories/"+cat.String(), token, nil)
+	assert.Equal(t, "Running", decodeCategory(t, wC.Body.Bytes()).Name)
+	wG := Do(t, testRouter, "GET", "/category-groups/"+grp.String(), token, nil)
+	var g model.CategoryGroup
+	require.NoError(t, json.NewDecoder(wG.Body).Decode(&g))
+	assert.Equal(t, "Health", g.Name)
+	assert.Equal(t, "#1F6B5C", g.Color)
 }
