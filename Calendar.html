@@ -1464,6 +1464,7 @@
     function TimerChip({ user, onLogged }) {
       const uid = user?.id;
       const [categories,setCategories] = React.useState([]);
+      const [groups,setGroups]         = React.useState([]);
       const [running,setRunning]       = React.useState(()=>getTimer(uid));
       const [now,setNow]               = React.useState(new Date());
       const [picking,setPicking]       = React.useState(false);
@@ -1471,7 +1472,8 @@
       const [busy,setBusy]             = React.useState(false);
 
       // Refetched each time the picker opens, so areas created or deleted since mount show up.
-      const loadCategories = () => api('/categories').then(d=>setCategories(d||[])).catch(()=>{});
+      const loadCategories = () => Promise.all([api('/categories'), api('/category-groups')])
+        .then(([cs,gs])=>{ setGroups(gs||[]); setCategories(resolveAreas(cs||[], gs||[])); }).catch(()=>{});
       React.useEffect(()=>{ loadCategories(); },[]);
 
       // Follow starts/stops made in other tabs.
@@ -1555,7 +1557,7 @@
         } finally { setBusy(false); }
       }
 
-      const areaColor  = running && (categories.find(c=>c.id===running.category_id)||{}).color;
+      const runArea    = running && categories.find(c=>c.id===running.category_id);
       const elapsedSec = running ? Math.max(0, Math.round((now - new Date(running.start_time))/1000)) : 0;
 
       return (
@@ -1567,7 +1569,7 @@
           )}
           {running && (
             <div style={{display:'flex',alignItems:'center',gap:6,background:'var(--bg-subtle)',border:'1px solid var(--border)',borderRadius:8,padding:'4px 6px 4px 10px'}}>
-              <span style={{width:8,height:8,borderRadius:'50%',background:areaColor||'#ef4444',flexShrink:0}}/>
+              <span style={{width:8,height:8,borderRadius:'50%',background:runArea?areaColor(runArea):'#ef4444',flexShrink:0}}/>
               <span style={{fontFamily:'var(--font-mono)',fontSize:13,fontWeight:600,minWidth:50}} title={running.title||undefined}>{fmtClock(elapsedSec)}</span>
               <button onClick={stop} disabled={busy} style={{...S.btnPri,padding:'4px 10px',fontSize:12}}>{busy?'Stopping…':'Stop'}</button>
               <button onClick={discard} disabled={busy} title="Discard without logging" style={{...S.iconBtn,color:'#dc2626',padding:'2px 6px'}}>×</button>
@@ -1580,7 +1582,7 @@
                   <label style={S.label}>Area</label>
                   <select style={S.input} value={form.category_id} onChange={e=>setForm(f=>({...f,category_id:e.target.value}))} autoFocus>
                     <option value="">No area</option>
-                    {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                    {areaOptions(categories,groups)}
                   </select>
                 </div>
                 <div style={{marginBottom:12}}>
