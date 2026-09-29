@@ -151,7 +151,8 @@ func (r *CalendarRepository) Update(ctx context.Context, id, ownerID uuid.UUID, 
 	return &c, err
 }
 
-// Delete moves the calendar's events to the user's default calendar, then deletes it.
+// Delete moves the calendar's events and recurring series to the user's default
+// calendar, then deletes it.
 // Returns an error if called on the default calendar.
 func (r *CalendarRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) error {
 	cal, err := r.GetByID(ctx, id, ownerID)
@@ -175,6 +176,14 @@ func (r *CalendarRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) 
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE events SET calendar_id = $1 WHERE calendar_id = $2`,
+		def.ID, id,
+	); err != nil {
+		return err
+	}
+	// Series too: recurring_events.calendar_id is ON DELETE RESTRICT, so one left behind
+	// would make the delete fail.
+	if _, err := tx.Exec(ctx,
+		`UPDATE recurring_events SET calendar_id = $1 WHERE calendar_id = $2`,
 		def.ID, id,
 	); err != nil {
 		return err

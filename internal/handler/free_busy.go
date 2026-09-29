@@ -63,7 +63,7 @@ func (h *FreeBusyHandler) Query(c *gin.Context) {
 	for _, email := range emails {
 		entry := model.FreeBusyEntry{Email: email, Busy: []model.TimeSlot{}}
 
-		target, _, err := h.userRepo.GetByEmail(ctx, email)
+		target, _, err := h.userRepo.GetByEmail(ctx, lookupEmail(email))
 		if err == pgx.ErrNoRows {
 			entry.Status = "not_found"
 			results = append(results, entry)

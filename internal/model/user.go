@@ -12,6 +12,9 @@ type User struct {
 	Email     string    `json:"email"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// TokenVersion is carried by login tokens; see middleware.Auth.
+	TokenVersion int `json:"-"`
 }
 
 type RegisterRequest struct {
@@ -25,8 +28,12 @@ type LoginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+// UpdateProfileRequest fields are optional, but a given one must be as valid as at
+// registration: an empty email would lock the account out once its token expires.
+// Changing email or password needs CurrentPassword.
 type UpdateProfileRequest struct {
-	Username *string `json:"username"`
-	Email    *string `json:"email"`
-	Password *string `json:"password"`
+	Username        *string `json:"username" binding:"omitempty,min=1"`
+	Email           *string `json:"email"    binding:"omitempty,email"`
+	Password        *string `json:"password"`
+	CurrentPassword *string `json:"current_password"`
 }

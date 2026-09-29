@@ -45,7 +45,7 @@ func (h *CalendarShareHandler) Share(c *gin.Context) {
 		return
 	}
 
-	target, _, err := h.userRepo.GetByEmail(c.Request.Context(), req.Email)
+	target, _, err := h.userRepo.GetByEmail(c.Request.Context(), lookupEmail(req.Email))
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "user not found"})
 		return

@@ -14,7 +14,8 @@ type Reminder struct {
 }
 
 // AttendeeStatus pairs an attendee email with their RSVP response.
-// Status values: "needs_action" | "accepted" | "declined" | "tentative"
+// Status values: "needs_action" | "accepted" | "declined" | "tentative" | "failed"
+// (the invitation couldn't be delivered).
 type AttendeeStatus struct {
 	Email  string `json:"email"`
 	Status string `json:"status"`
@@ -37,8 +38,13 @@ type Event struct {
 	Visibility       string           `json:"visibility"` // "public" | "private"
 	CategoryID       *uuid.UUID       `json:"category_id,omitempty"`
 	RecurringEventID *uuid.UUID       `json:"recurring_event_id,omitempty"`
-	CreatedAt        time.Time        `json:"created_at"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	// DetachedFrom is the series an occurrence edited on its own came from: it's no longer
+	// linked (RecurringEventID is nil), but still part of that series, which deletes it.
+	DetachedFrom *uuid.UUID `json:"detached_from,omitempty"`
+	// OriginalStart is the occurrence it was, where DetachedFrom is set.
+	OriginalStart *time.Time `json:"-"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 type CreateEventRequest struct {
@@ -48,12 +54,12 @@ type CreateEventRequest struct {
 	Location    string     `json:"location"`
 	StartTime   time.Time  `json:"start_time" binding:"required"`
 	EndTime     time.Time  `json:"end_time"   binding:"required"`
-	Attendees   []string   `json:"attendees"`
+	Attendees   []string   `json:"attendees" binding:"omitempty,max=100,dive,email"`
 	Reminders   []Reminder `json:"reminders"`
 	AllDay      bool       `json:"all_day"`
 	Timezone    string     `json:"timezone"`
 	CategoryID  *uuid.UUID `json:"category_id"`
-	Visibility  string     `json:"visibility"`
+	Visibility  string     `json:"visibility" binding:"omitempty,oneof=public private"`
 }
 
 type UpdateEventRequest struct {
@@ -63,11 +69,11 @@ type UpdateEventRequest struct {
 	Location    *string    `json:"location"`
 	StartTime   *time.Time `json:"start_time"`
 	EndTime     *time.Time `json:"end_time"`
-	Attendees   []string   `json:"attendees"`
+	Attendees   []string   `json:"attendees" binding:"omitempty,max=100,dive,email"`
 	Reminders   []Reminder `json:"reminders"`
 	AllDay      *bool      `json:"all_day"`
 	Timezone    *string    `json:"timezone"`
 	// Optional so an explicit null clears the category; absent keeps it.
 	CategoryID Optional[uuid.UUID] `json:"category_id"`
-	Visibility *string             `json:"visibility"`
+	Visibility *string             `json:"visibility" binding:"omitempty,oneof=public private"`
 }

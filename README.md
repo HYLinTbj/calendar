@@ -163,7 +163,7 @@ All services read configuration from environment variables. Defaults work out of
 | `DB_PASSWORD` | api, scheduler, notification | `calendar` | PostgreSQL password |
 | `DB_NAME` | api, scheduler, notification | `calendar` | PostgreSQL database |
 | `REDIS_ADDR` | api, notification | `localhost:6379` | Redis address |
-| `JWT_SECRET` | api | `secret` | JWT signing key — **change in production** |
+| `JWT_SECRET` | api | — (required) | JWT signing key, at least 32 bytes; the api won't start without it. For compose, put it in `.env` (see `.env.example`) |
 | `PORT` | api | `8080` | HTTP listen port |
 | `SMTP_HOST` | notification | `localhost` | SMTP host |
 | `SMTP_PORT` | notification | `1025` | SMTP port |

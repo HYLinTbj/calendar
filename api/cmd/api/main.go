@@ -15,6 +15,10 @@ import (
 )
 
 func main() {
+	if err := middleware.CheckJWTSecret(); err != nil {
+		log.Fatal(err)
+	}
+
 	ctx := context.Background()
 
 	pool, err := db.NewPool(ctx)
@@ -45,6 +49,12 @@ func main() {
 	taskRepo := repository.NewTaskRepository(pool)
 	reminderQueue := queue.NewReminderQueue(rdb)
 
+	if n, err := recurringRepo.RepairLegacyExceptions(ctx); err != nil {
+		log.Printf("repair legacy recurring exceptions: %v", err)
+	} else if n > 0 {
+		log.Printf("repaired %d recurring-event instances edited before exceptions were tracked", n)
+	}
+
 	authHandler := handler.NewAuthHandler(userRepo, calRepo)
 	userHandler := handler.NewUserHandler(userRepo)
 	calHandler := handler.NewCalendarHandler(calRepo)
@@ -70,7 +80,7 @@ func main() {
 		auth.POST("/login", authHandler.Login)
 	}
 
-	protected := r.Group("/", middleware.Auth())
+	protected := r.Group("/", middleware.Auth(userRepo))
 	{
 		users := protected.Group("/users")
 		{
@@ -106,6 +116,7 @@ func main() {
 			events.PUT("/:id", eventHandler.Update)
 			events.PUT("/:id/recurrence", eventHandler.UpdateRecurrence)
 			events.DELETE("/:id", eventHandler.Delete)
+			events.DELETE("/:id/recurrence", eventHandler.DeleteRecurrence)
 		}
 
 		cats := protected.Group("/categories")

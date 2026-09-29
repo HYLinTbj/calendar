@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,6 +31,11 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if msg := passwordProblem(req.Password); msg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		return
+	}
+	req.Email = normalizeEmail(req.Email)
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not hash password"})
@@ -52,13 +58,50 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	c.JSON(http.StatusCreated, user)
 }
 
+// normalizeEmail is how emails are stored: they're case-insensitive (see Migrate).
+func normalizeEmail(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// lookupEmail is how an email is looked up: GetByEmail matches it case-insensitively, but
+// needs its case to pick the exact match among legacy accounts differing only in case.
+func lookupEmail(s string) string {
+	return strings.TrimSpace(s)
+}
+
+// issueToken signs a login token for user u, valid for 24h and until their password
+// next changes (TokenVersion).
+func issueToken(u *model.User) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, middleware.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		UserID:       u.ID,
+		TokenVersion: u.TokenVersion,
+	})
+	return token.SignedString(middleware.JWTSecret())
+}
+
+// passwordProblem returns why pw can't be used, or "" if it can. bcrypt hashes at most
+// 72 bytes and rejects longer input, which would otherwise surface as a 500.
+func passwordProblem(pw string) string {
+	switch {
+	case len(pw) < 8:
+		return "password must be at least 8 characters"
+	case len(pw) > 72:
+		return "password must be at most 72 bytes"
+	}
+	return ""
+}
+
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req model.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	user, hash, err := h.userRepo.GetByEmail(c.Request.Context(), req.Email)
+	user, hash, err := h.userRepo.GetByEmail(c.Request.Context(), lookupEmail(req.Email))
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
@@ -71,14 +114,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, middleware.Claims{
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-		},
-		UserID: user.ID,
-	})
-	signed, err := token.SignedString(middleware.JWTSecret())
+	signed, err := issueToken(user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sign token"})
 		return

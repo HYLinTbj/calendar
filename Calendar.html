@@ -69,11 +69,56 @@
     function fmtHour(h) { return h===0?'12 AM':h<12?`${h} AM`:h===12?'12 PM':`${h-12} PM`; }
     function hhmm(date) { return `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`; }
     function fmtMins(m) { m=Math.round(m||0); const h=Math.floor(m/60), mm=m%60; if(h&&mm) return `${h}h ${mm}m`; if(h) return `${h}h`; return `${mm}m`; }
+    function fmtClock(totalSec) {
+      const s = Math.max(0, Math.floor(totalSec||0));
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60;
+      const pad = n => String(n).padStart(2,'0');
+      return h>0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
+    }
+    function weekday(dateStr) { return new Date(`${dateStr}T00:00:00`).getDay(); } // 'YYYY-MM-DD' → Sun=0..Sat=6
+    // ↻ on an occurrence of a recurring series, including one edited on its own: it's no
+    // longer linked, but still part of its series (deleting the series deletes it too).
+    function SeriesMark({ evt }) {
+      if(!evt.recurring_event_id && !evt.detached_from) return null;
+      return <span style={{marginRight:3,opacity:0.85}} title={evt.recurring_event_id?'Recurring event':'Edited occurrence of a recurring event'}>↻</span>;
+    }
     function weekRange(d) { const s=startOfWeek(d); return { from:s, to:addDays(s,7) }; }
 
     // All-day events use UTC date directly; timed events use local date
     function evtKey(e) {
-      return e.all_day ? e.start_time.slice(0,10) : ymd(new Date(e.start_time));
+      return e.all_day ? new Date(e.start_time).toISOString().slice(0,10) : ymd(new Date(e.start_time));
+    }
+    // The UTC date an all-day event ends on. It ends at 23:59:59Z on its last day, or at
+    // 00:00Z the day after when imported from ICS (whose DTEND is exclusive).
+    function allDayLast(e) {
+      return new Date(Math.max(new Date(e.end_time).getTime()-1000, new Date(e.start_time).getTime())).toISOString().slice(0,10);
+    }
+    // A timed event's piece of each local day it covers, clipped to that day:
+    // [{key, start, end, before, after}], before/after = it continues from the previous
+    // day / into the next. Ending exactly at midnight doesn't reach into the next day.
+    function timedSegments(e) {
+      const s=new Date(e.start_time), en=new Date(e.end_time);
+      const segs=[];
+      let dayStart=new Date(s); dayStart.setHours(0,0,0,0);
+      do {
+        const next=addDays(dayStart,1);
+        segs.push({key:ymd(dayStart), start:s>dayStart?s:dayStart, end:en<next?en:next, before:segs.length>0, after:en>next});
+        dayStart=next;
+      } while(dayStart<en && segs.length<366);
+      return segs;
+    }
+    // Every date an event shows on: all-day ones by UTC date, timed ones by local date.
+    function dayKeys(e) { return e.all_day ? allDayKeys(e) : timedSegments(e).map(sg=>sg.key); }
+    // Every UTC date an all-day event covers.
+    function allDayKeys(e) {
+      const s=new Date(e.start_time), last=allDayLast(e);
+      const keys=[];
+      for(const d=new Date(Date.UTC(s.getUTCFullYear(),s.getUTCMonth(),s.getUTCDate())); keys.length<366; d.setUTCDate(d.getUTCDate()+1)){
+        const k=d.toISOString().slice(0,10);
+        keys.push(k);
+        if(k>=last) break;
+      }
+      return keys;
     }
 
     function getMonthGrid(date) {
@@ -102,7 +147,10 @@
       const headers = { 'Content-Type':'application/json', ...opts.headers };
       if (tok) headers['Authorization'] = `Bearer ${tok}`;
       const res = await fetch(`${API_BASE}${path}`, {...opts, headers});
-      if (res.status===401) { clearToken(); window.location.reload(); return; }
+      // A 401 means the session is gone (expired, or logged out in another tab): sign
+      // out. Except when logging in, where it's just a failed attempt — fall through so
+      // the caller gets the error ("invalid credentials") to show.
+      if (res.status===401 && !path.startsWith('/auth/')) { clearToken(); window.location.reload(); return; }
       if (res.status===204) return null;
       const body = await res.json().catch(()=>({}));
       if (!res.ok) throw new Error(body.error || body.message || `HTTP ${res.status}`);
@@ -283,7 +331,7 @@
     // ─────────────────────────────────────────────
     // HEADER
     // ─────────────────────────────────────────────
-    function Header({ view, onView, currentDate, onNav, onToday, user, onLogout, search, onSearch, workspace, onWorkspace }) {
+    function Header({ view, onView, currentDate, onNav, onToday, user, onLogout, search, onSearch, workspace, onWorkspace, onLogged }) {
       const title = React.useMemo(()=>{
         if (view==='month') return `${MONTHS[currentDate.getMonth()]} ${currentDate.getFullYear()}`;
         if (view==='day')   return `${DAYS[currentDate.getDay()]}, ${MONTHS[currentDate.getMonth()].slice(0,3)} ${currentDate.getDate()}, ${currentDate.getFullYear()}`;
@@ -298,6 +346,7 @@
           <div style={{fontSize:20,fontWeight:700,color:'var(--accent)',letterSpacing:'-0.03em',marginRight:4}}>Tempo</div>
 
           <WorkspaceNav workspace={workspace} onWorkspace={onWorkspace}/>
+          <TimerChip user={user} onLogged={onLogged}/>
 
           <div style={{display:'flex',alignItems:'center',gap:2}}>
             <button onClick={onToday} style={{...S.btnOut,padding:'5px 12px',fontSize:13}}>Today</button>
@@ -345,7 +394,7 @@
       const today = new Date();
       const byDay = React.useMemo(()=>{
         const m={};
-        events.forEach(e=>{ const k=evtKey(e); (m[k]=m[k]||[]).push(e); });
+        events.forEach(e=>{ dayKeys(e).forEach(k=>{ (m[k]=m[k]||[]).push(e); }); });
         Object.values(m).forEach(arr=>arr.sort((a,b)=>new Date(a.start_time)-new Date(b.start_time)));
         return m;
       },[events]);
@@ -388,7 +437,8 @@
                         fontSize:11,fontWeight:500,marginBottom:2,
                         overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis',cursor:'pointer',
                       }}>
-                        {!evt.all_day&&<span style={{marginRight:3,opacity:0.85}}>{fmtTime(evt.start_time)}</span>}
+                        {!evt.all_day&&evtKey(evt)===k&&<span style={{marginRight:3,opacity:0.85}}>{fmtTime(evt.start_time)}</span>}
+                        <SeriesMark evt={evt}/>
                         {evt.title}
                       </div>
                     );
@@ -427,22 +477,35 @@
       const [drag,setDrag]=React.useState(null); // { evt, dayIndex, startMin, durMin, moved, ... }
       const suppressClick=React.useRef(0); // timestamp of last drag end; swallows the trailing click
 
+      // Timed events per day column. One crossing midnight is split into a segment per
+      // day it covers, each clipped to its day, so it neither runs off the bottom of its
+      // first day nor goes missing from the next.
       const byDay=React.useMemo(()=>{
         const m={};
         days.forEach(d=>{m[ymd(d)]=[];});
-        events.forEach(e=>{ const k=evtKey(e); if(m[k]) m[k].push(e); });
+        events.forEach(e=>{ if(!e.all_day) timedSegments(e).forEach(sg=>{ if(m[sg.key]) m[sg.key].push({...sg,evt:e}); }); });
         return m;
       },[days,events]);
+      // All-day events have no place on the hour grid, so they get a row above it,
+      // listed on every day they cover.
+      const allDayByDay=React.useMemo(()=>{
+        const m={};
+        days.forEach(d=>{m[ymd(d)]=[];});
+        events.forEach(e=>{ if(e.all_day) allDayKeys(e).forEach(k=>{ if(m[k]) m[k].push(e); }); });
+        return m;
+      },[days,events]);
+      const hasAllDay=Object.values(allDayByDay).some(a=>a.length>0);
 
       // Apply the in-progress drag as a preview: pull the dragged event out of its
       // origin day and drop a repositioned clone into the target day/time.
       const renderByDay=React.useMemo(()=>{
         if(!drag||!drag.moved) return byDay;
-        const m={}; for(const key in byDay) m[key]=byDay[key].filter(e=>e.id!==drag.evt.id);
+        const m={}; for(const key in byDay) m[key]=byDay[key].filter(sg=>sg.evt.id!==drag.evt.id);
         const day=days[drag.dayIndex]; const k=ymd(day);
         const ns=new Date(day); ns.setHours(0,0,0,0); ns.setMinutes(drag.startMin);
         const ne=new Date(ns.getTime()+drag.durMin*60000);
-        (m[k]=m[k]||[]).push({...drag.evt,start_time:ns.toISOString(),end_time:ne.toISOString(),_drag:true});
+        (m[k]=m[k]||[]).push({key:k,start:ns,end:ne,before:false,after:false,
+          evt:{...drag.evt,start_time:ns.toISOString(),end_time:ne.toISOString(),_drag:true}});
         return m;
       },[byDay,drag,days]);
 
@@ -450,11 +513,11 @@
       // transitively overlap, give each the first column that's free at its start,
       // then share the cluster's width equally. Returns {id: {col, cols}}.
       // Uses the same 30-min minimum as evStyle so visually-touching events split too.
-      function layoutDay(evts) {
-        const items=evts.map(e=>{
-          const s=new Date(e.start_time).getTime();
-          const en=Math.max(new Date(e.end_time).getTime(),s+30*60000);
-          return {id:e.id,s,en};
+      function layoutDay(segs) {
+        const items=segs.map(sg=>{
+          const s=sg.start.getTime();
+          const en=Math.max(sg.end.getTime(),s+30*60000);
+          return {id:sg.evt.id,s,en};
         }).sort((a,b)=>a.s-b.s||b.en-a.en);
         const lay={};
         let cluster=[],colEnds=[],clusterEnd=-Infinity;
@@ -471,17 +534,22 @@
         return lay;
       }
 
-      function evStyle(evt,col,pos,dragging) {
-        const s=new Date(evt.start_time), en=new Date(evt.end_time);
-        const top=(s.getHours()*60+s.getMinutes())*(HOUR_H/60);
+      function evStyle(sg,col,pos,dragging,draggable) {
+        const s=sg.start, en=sg.end;
         const dur=Math.max((en-s)/60000,30);
+        const height=Math.max(dur*(HOUR_H/60)-2,20);
+        // A segment ends by midnight, but the 30-min minimum can still push a late one
+        // past the bottom of the day; nudge it up instead so it stays readable.
+        const top=Math.min((s.getHours()*60+s.getMinutes())*(HOUR_H/60), 24*HOUR_H-height);
         const w=100/pos.cols;
+        // Square the corners where the event continues from/into the neighbouring day.
+        const rTop=sg.before?0:5, rBottom=sg.after?0:5;
         // border-box so the 6px padding stays inside the width — otherwise events
         // spilled past the day column's right border.
-        return { position:'absolute',top,height:Math.max(dur*(HOUR_H/60)-2,20),
+        return { position:'absolute',top,height,
                  left:`calc(${pos.col*w}% + 2px)`,width:`calc(${w}% - 6px)`,boxSizing:'border-box',
-                 background:col,borderRadius:5,padding:'2px 6px',overflow:'hidden',
-                 cursor:dragging?'grabbing':'grab',color:'#fff',fontSize:11,fontWeight:500,
+                 background:col,borderRadius:`${rTop}px ${rTop}px ${rBottom}px ${rBottom}px`,padding:'2px 6px',overflow:'hidden',
+                 cursor:dragging?'grabbing':draggable?'grab':'pointer',color:'#fff',fontSize:11,fontWeight:500,
                  zIndex:dragging?5:1,opacity:dragging?0.95:1,
                  boxShadow:dragging?'0 6px 16px rgba(0,0,0,0.28)':'none',
                  touchAction:'none',userSelect:'none',WebkitUserSelect:'none' };
@@ -557,6 +625,25 @@
             ))}
           </div>
 
+          {hasAllDay&&(
+            <div style={{display:'flex',borderBottom:'1px solid var(--border)',flexShrink:0,maxHeight:92,overflowY:'auto'}}>
+              <div style={{width:52,flexShrink:0,boxSizing:'border-box',padding:'5px 8px 0 0',textAlign:'right',fontSize:10,color:'var(--text-muted)'}}>all-day</div>
+              {days.map((day,i)=>(
+                <div key={i} style={{flex:1,minWidth:0,padding:'2px 2px 0',borderLeft:'1px solid var(--border)'}}>
+                  {allDayByDay[ymd(day)].map(evt=>(
+                    <div key={evt.id} onClick={()=>onEventClick(evt)} title={evt.title} style={{
+                      background:getEventColor(evt,calendars,categories),color:'#fff',borderRadius:4,padding:'1px 5px',
+                      fontSize:11,fontWeight:500,marginBottom:2,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis',cursor:'pointer',
+                    }}>
+                      <SeriesMark evt={evt}/>
+                      {evt.title}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* scrollable grid */}
           <div ref={ref} style={{flex:1,overflow:'auto',position:'relative'}}>
             <div style={{display:'flex',minHeight:HOUR_H*24}}>
@@ -580,17 +667,22 @@
                            onClick={()=>{ if(Date.now()-suppressClick.current<300) return; const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
                     ))}
                     {(()=>{
-                      const timed=dayEvts.filter(e=>!e.all_day);
-                      const lay=layoutDay(timed);
-                      return timed.map(evt=>{
+                      const lay=layoutDay(dayEvts);
+                      return dayEvts.map(sg=>{
+                        const evt=sg.evt;
                         const col=getEventColor(evt,calendars,categories);
                         const dragging=!!evt._drag;
+                        // Dragging moves the event within one day, so one spanning midnight is
+                        // rescheduled from the editor instead.
+                        const draggable=!sg.before&&!sg.after;
                         return (
-                          <div key={evt.id} style={{...evStyle(evt,col,lay[evt.id],dragging),...(dragging?{pointerEvents:'none'}:null)}}
-                               onPointerDown={dragging?undefined:e=>onEventDown(e,evt,di)}
+                          <div key={evt.id} style={{...evStyle(sg,col,lay[evt.id],dragging,draggable),...(dragging?{pointerEvents:'none'}:null)}}
+                               onPointerDown={dragging||!draggable?undefined:e=>onEventDown(e,evt,di)}
                                onClick={e=>{ e.stopPropagation(); if(Date.now()-suppressClick.current<300) return; onEventClick(evt); }}>
-                            <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>{evt.title}</div>
-                            <div style={{opacity:0.85,fontSize:10}}>{fmtTime(evt.start_time)}</div>
+                            <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}><SeriesMark evt={evt}/>{evt.title}</div>
+                            <div style={{opacity:0.85,fontSize:10}}>{sg.before
+                              ? (sg.after ? `from ${fmtTime(evt.start_time)}` : `until ${fmtTime(evt.end_time)}`)
+                              : fmtTime(evt.start_time)}</div>
                           </div>
                         );
                       });
@@ -637,7 +729,7 @@
                 <span style={{width:8,height:8,borderRadius:'50%',background:col,flexShrink:0,marginTop:4}}/>
                 <div>
                   <div style={{fontSize:13,fontWeight:500}}>{evt.title}</div>
-                  <div style={{fontSize:11,color:'var(--text-muted)',marginTop:1}}>{new Date(evt.start_time).toLocaleDateString([],{month:'short',day:'numeric',year:'numeric'})}</div>
+                  <div style={{fontSize:11,color:'var(--text-muted)',marginTop:1}}>{new Date(evt.start_time).toLocaleDateString([],{month:'short',day:'numeric',year:'numeric',...(evt.all_day&&{timeZone:'UTC'})})}</div>
                 </div>
               </div>
             );
@@ -649,15 +741,24 @@
     // ─────────────────────────────────────────────
     // EVENT MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function EventModal({ event, defaultDate, calendars, categories, onSave, onDelete, onClose, onCategoryCreated }) {
+    function EventModal({ event, defaultDate, calendars, categories, onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
       const isEdit = !!event?.id;
+      const isRecurring = isEdit && !!event.recurring_event_id;
+      // Edited on its own: no longer linked, but still part of its series, so it can delete
+      // the series too. Edits apply to it alone.
+      const isException = isEdit && !event.recurring_event_id && !!event.detached_from;
       const [newArea,setNewArea]=React.useState(false);
+      const [confirmingDelete,setConfirmingDelete]=React.useState(false);
       const defStart = React.useMemo(()=>{
         if(defaultDate){ const d=new Date(defaultDate); d.setSeconds(0,0); return d; }
         const d=new Date(); d.setMinutes(0,0,0); return d;
       },[]);
       const defEnd = React.useMemo(()=>{ const d=new Date(defStart); d.setHours(d.getHours()+1); return d; },[defStart]);
 
+      // All-day events are stored as UTC midnight..23:59:59Z, so read their dates in UTC
+      // (as evtKey does) — the local date is a day off in any non-UTC timezone, and
+      // saving it back would move the event (or, with a series scope, the whole series).
+      const evDate = iso => event.all_day ? new Date(iso).toISOString().slice(0,10) : ymd(new Date(iso));
       const [form,setForm]=React.useState(()=>({
         title:       event?.title||'',
         description: event?.description||'',
@@ -665,10 +766,20 @@
         calendar_id: event?.calendar_id||calendars[0]?.id||'',
         category_id: event?.category_id||'',
         all_day:     event?.all_day||false,
-        start_date:  event?ymd(new Date(event.start_time)):ymd(defStart),
+        private:     event?.visibility==='private',
+        start_date:  event?evDate(event.start_time):ymd(defStart),
         start_time:  event?hhmm(new Date(event.start_time)):hhmm(defStart),
-        end_date:    event?ymd(new Date(event.end_time)):ymd(defEnd),
+        end_date:    event?(event.all_day?allDayLast(event):evDate(event.end_time)):ymd(defEnd),
         end_time:    event?hhmm(new Date(event.end_time)):hhmm(defEnd),
+        // recurrence pattern — create-mode only
+        repeat_freq:      'none',    // 'none' | 'daily' | 'weekly' | 'monthly' | 'yearly'
+        repeat_interval:  '1',
+        repeat_days:      new Set(), // Sun=0..Sat=6, matches Go's time.Weekday — only read when weekly
+        repeat_end:       'never',   // 'never' | 'on_date' | 'after_n'
+        repeat_end_date:  '',
+        repeat_end_count: '10',
+        // scope choice — editing an existing series instance only
+        edit_scope:       'this',    // 'this' | 'this_and_following' | 'all'
       }));
       const [busy,setBusy]=React.useState(false);
       const [err,setErr]=React.useState('');
@@ -680,6 +791,9 @@
       // to 1h if the range was invalid), so the end always stays after the start.
       const setStart=k=>e=>setForm(f=>{
         const next={...f,[k]:e.target.value};
+        // Weekly days still at their seed (just the old start weekday) follow the start date.
+        const oldDow=weekday(f.start_date), newDow=weekday(next.start_date);
+        if(f.repeat_days.size===1 && f.repeat_days.has(oldDow) && !isNaN(newDow)) next.repeat_days=new Set([newDow]);
         if(f.all_day){
           const delta=Math.round((new Date(next.start_date+'T00:00:00')-new Date(f.start_date+'T00:00:00'))/86400000);
           if(delta) next.end_date=ymd(addDays(new Date(f.end_date+'T00:00:00'),delta));
@@ -691,46 +805,162 @@
         }
         return next;
       });
+      // Switching to all-day: a timed range shorter than a day is one day, even when it
+      // crosses midnight (e.g. the default hour for an event started at 11:30 PM).
+      // Switching back: an all-day event's times (its UTC bounds, in local time) can be out
+      // of order, so an invalid range becomes an hour from the start.
+      const toggleAllDay=e=>{
+        const on=e.target.checked;
+        setForm(f=>{
+          const next={...f,all_day:on};
+          if(on && combine(f.end_date,f.end_time)-combine(f.start_date,f.start_time)<86400000) next.end_date=f.start_date;
+          if(!on && !(combine(f.end_date,f.end_time)>combine(f.start_date,f.start_time))){
+            const ne=new Date(combine(f.start_date,f.start_time).getTime()+3600000);
+            next.end_date=ymd(ne); next.end_time=hhmm(ne);
+          }
+          return next;
+        });
+      };
       const rangeInvalid = form.all_day
         ? form.end_date < form.start_date
         : !(combine(form.end_date,form.end_time)>combine(form.start_date,form.start_time));
+      const weeklyDaysInvalid = !isEdit && form.repeat_freq==='weekly' && form.repeat_days.size===0;
+      // The backend always emits start_time as occurrence #1, so a start date off the
+      // selected days would add a stray event on a day the user didn't pick.
+      const weeklyStartInvalid = !isEdit && form.repeat_freq==='weekly' && form.repeat_days.size>0
+        && !form.repeat_days.has(weekday(form.start_date));
+      const repeatEndInvalid  = !isEdit && form.repeat_freq!=='none' && form.repeat_end==='on_date'
+        && (!form.repeat_end_date || form.repeat_end_date < form.start_date);
+      const formInvalid = rangeInvalid || weeklyDaysInvalid || weeklyStartInvalid || repeatEndInvalid;
+
+      function pickFreq(freq){
+        setForm(f=>{
+          const next={...f,repeat_freq:freq};
+          // Seed with the start date's own weekday the first time Weekly is picked, so an
+          // empty days_of_week is never sent — equivalent to the backend's own default
+          // stepping in that case, so this just makes an implicit default explicit.
+          if(freq==='weekly' && f.repeat_days.size===0){
+            next.repeat_days=new Set([weekday(f.start_date)]);
+          }
+          return next;
+        });
+      }
+      function toggleDay(i){
+        setForm(f=>{ const days=new Set(f.repeat_days); days.has(i)?days.delete(i):days.add(i); return {...f,repeat_days:days}; });
+      }
 
       async function save(e) {
         e.preventDefault();
         if(!form.title.trim()){setErr('Title is required');return;}
         if(rangeInvalid){setErr(form.all_day?'End date must be on or after the start date.':'End time must be after the start time.');return;}
+        if(weeklyDaysInvalid){setErr('Select at least one day of the week.');return;}
+        if(weeklyStartInvalid){setErr('The start date must fall on one of the selected days.');return;}
+        if(repeatEndInvalid){setErr('Pick an end date on or after the start date, or choose Never.');return;}
         setBusy(true); setErr('');
         try {
           const startISO = form.all_day
             ? `${form.start_date}T00:00:00Z`
             : new Date(`${form.start_date}T${form.start_time}:00`).toISOString();
+          // All-day events end at 23:59:59Z on their last day, or at 00:00Z the day after
+          // when imported from ICS (exclusive DTEND): keep the event's own convention, so
+          // saving it unchanged changes nothing.
+          const exclusiveEnd = isEdit && event.all_day && new Date(event.end_time).toISOString().slice(11,19)==='00:00:00';
+          const dayAfter = d => new Date(Date.parse(`${d}T00:00:00Z`)+86400000).toISOString().slice(0,10);
           const endISO   = form.all_day
-            ? `${form.end_date}T23:59:59Z`
+            ? (exclusiveEnd ? `${dayAfter(form.end_date)}T00:00:00Z` : `${form.end_date}T23:59:59Z`)
             : new Date(`${form.end_date}T${form.end_time}:00`).toISOString();
-          const body = {title:form.title.trim(),description:form.description,location:form.location,calendar_id:form.calendar_id,start_time:startISO,end_time:endISO,all_day:form.all_day};
-          // Explicit null clears the category on edit ("None" selected);
-          // omitting the field would keep the current one.
-          body.category_id = form.category_id || null;
-          const saved = isEdit
-            ? await api(`/events/${event.id}`,{method:'PUT', body:JSON.stringify(body)})
-            : await api('/events',              {method:'POST',body:JSON.stringify(body)});
-          onSave(saved);
+
+          if (isEdit && isRecurring) {
+            // Scoped edit of an existing series instance.
+            const body = { scope: form.edit_scope, title: form.title.trim(), description: form.description,
+              location: form.location, start_time: startISO, end_time: endISO, all_day: form.all_day,
+              visibility: form.private ? 'private' : 'public' };
+            // UpdateRecurrenceRequest.category_id is a plain pointer (nil = keep) — it can
+            // only set a category here, never clear one, so "None" is disabled below and
+            // we never send category_id:null on this path.
+            if (form.category_id) body.category_id = form.category_id;
+            const saved = await api(`/events/${event.id}/recurrence`,{method:'PUT',body:JSON.stringify(body)});
+            // scope:"this" returns a plain Event (mergeable by id); this_and_following/all
+            // return a RecurringEvent and touch rows beyond this one instance — refetch instead.
+            if (form.edit_scope === 'this') { onSave(saved); } else { onRefetch(); onClose(); }
+
+          } else if (!isEdit && form.repeat_freq !== 'none') {
+            // New recurring series.
+            const body = {
+              calendar_id: form.calendar_id, title: form.title.trim(), description: form.description,
+              location: form.location, start_time: startISO, end_time: endISO, all_day: form.all_day,
+              visibility: form.private ? 'private' : 'public',
+              category_id: form.category_id || null,
+              frequency: form.repeat_freq,
+              interval: Math.max(1, parseInt(form.repeat_interval, 10) || 1),
+              days_of_week: form.repeat_freq === 'weekly' ? [...form.repeat_days].sort((a,b)=>a-b) : [],
+              // Weeks start on Sunday here, as in the day picker and the calendar; every
+              // 2+ weeks, the days of one such week repeat together.
+              week_start: form.repeat_freq === 'weekly' ? 0 : undefined,
+              // Anchor to the creator's IANA zone; server defaults to UTC (no DST) when
+              // omitted, which would visibly shift the displayed time across a DST change.
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            };
+            // "Ends on" includes that whole day in the user's own timezone; all-day instants
+            // are UTC midnight, so for them the day ends at 23:59:59Z.
+            if (form.repeat_end === 'on_date') body.end_date = form.all_day
+              ? `${form.repeat_end_date}T23:59:59Z`
+              : new Date(`${form.repeat_end_date}T23:59:59`).toISOString();
+            if (form.repeat_end === 'after_n') body.max_occurrences = Math.max(1, parseInt(form.repeat_end_count, 10) || 1);
+            await api('/recurring-events', {method:'POST', body:JSON.stringify(body)});
+            // Response is a RecurringEvent, not a single mergeable Event — refetch instead.
+            // Safe to refetch immediately: creation synchronously materializes the next 60
+            // days of instances in the same request, no scheduler wait involved.
+            onRefetch(); onClose();
+
+          } else {
+            const body = {title:form.title.trim(),description:form.description,location:form.location,calendar_id:form.calendar_id,start_time:startISO,end_time:endISO,all_day:form.all_day,visibility:form.private?'private':'public'};
+            // Explicit null clears the category on edit ("None" selected);
+            // omitting the field would keep the current one.
+            body.category_id = form.category_id || null;
+            const saved = isEdit
+              ? await api(`/events/${event.id}`,{method:'PUT', body:JSON.stringify(body)})
+              : await api('/events',              {method:'POST',body:JSON.stringify(body)});
+            onSave(saved);
+          }
         } catch(ex){setErr(ex.message);}
         finally{setBusy(false);}
       }
 
-      async function del() {
-        if(!confirm('Delete this event?'))return;
-        setBusy(true);
-        try{ await api(`/events/${event.id}`,{method:'DELETE'}); onDelete(event.id); }
-        catch(ex){setErr(ex.message);setBusy(false);}
+      // scope undefined → delete a plain event. For a series instance: 'this' deletes
+      // just it (the series remembers not to regenerate it), 'this_and_following' ends
+      // the series here but keeps earlier occurrences, 'all' deletes every occurrence.
+      async function del(scope) {
+        const confirmMsg = !scope ? 'Delete this event?'
+          : scope === 'all'
+          ? `Delete every occurrence of "${event.title}", past ones and ones you edited on their own included? Time logged by past occurrences will be removed from your stats. To keep them, choose "This and following" on the next upcoming occurrence instead.`
+          : scope === 'this_and_following'
+          ? `Delete this and every later occurrence of "${event.title}", including later ones you edited on their own? Earlier occurrences are kept.`
+          : null;
+        // The explicit "This event" click already carries the weight of a confirm; the
+        // multi-occurrence choices get one more check.
+        if (confirmMsg && !confirm(confirmMsg)) return;
+        setBusy(true); setErr('');
+        try {
+          if (!scope) {
+            await api(`/events/${event.id}`,{method:'DELETE'});
+            onDelete(event.id);
+          } else {
+            await api(`/events/${event.id}/recurrence?scope=${scope}`,{method:'DELETE'});
+            if (scope === 'this') onDelete(event.id); else { onRefetch(); onClose(); }
+          }
+        } catch(ex){ setErr(ex.message); setBusy(false); }
       }
 
       return (
         <div style={S.overlay} onClick={onClose}>
           <div style={{...S.modal,width:480}} onClick={e=>e.stopPropagation()}>
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
-              <h2 style={{margin:0,fontSize:18,fontWeight:700}}>{isEdit?'Edit Event':'New Event'}</h2>
+              <div>
+                <h2 style={{margin:0,fontSize:18,fontWeight:700}}>{isEdit?'Edit Event':'New Event'}</h2>
+                {isRecurring&&<div style={{fontSize:12,color:'var(--text-muted)',marginTop:2}}>↻ Part of a recurring series</div>}
+                {isException&&<div style={{fontSize:12,color:'var(--text-muted)',marginTop:2}}>↻ Edited occurrence of a recurring series: changes apply to it alone</div>}
+              </div>
               <button onClick={onClose} style={{...S.iconBtn,fontSize:22}}>×</button>
             </div>
             <form onSubmit={save}>
@@ -748,18 +978,94 @@
                 </div>
                 {rangeInvalid&&<div style={{color:'#dc2626',fontSize:12,marginTop:6}}>{form.all_day?'End date must be on or after the start date.':'End time must be after the start time.'}</div>}
               </div>
-              <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer',marginBottom:14}}>
-                <input type="checkbox" checked={form.all_day} onChange={set('all_day')} style={{width:14,height:14,accentColor:'var(--accent)'}}/>
-                All day
-              </label>
+              <div style={{display:'flex',gap:20,marginBottom:14}}>
+                <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer'}}>
+                  <input type="checkbox" checked={form.all_day} onChange={toggleAllDay} style={{width:14,height:14,accentColor:'var(--accent)'}}/>
+                  All day
+                </label>
+                <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer'}} title="People you share this calendar with see only “Busy”">
+                  <input type="checkbox" checked={form.private} onChange={set('private')} style={{width:14,height:14,accentColor:'var(--accent)'}}/>
+                  Private
+                </label>
+              </div>
+              {!isEdit && (
+                <div style={{marginBottom:14}}>
+                  <label style={S.label}>Repeats</label>
+                  <div style={{display:'flex',background:'var(--bg-subtle)',borderRadius:8,padding:2,gap:1}}>
+                    {[['none','None'],['daily','Daily'],['weekly','Weekly'],['monthly','Monthly'],['yearly','Yearly']].map(([k,label])=>(
+                      <button key={k} type="button" onClick={()=>pickFreq(k)} style={{
+                        flex:1,padding:'5px 6px',borderRadius:6,border:'none',cursor:'pointer',fontSize:12,fontWeight:500,
+                        background:form.repeat_freq===k?'#fff':'transparent',
+                        color:form.repeat_freq===k?'var(--text)':'var(--text-muted)',
+                        boxShadow:form.repeat_freq===k?'0 1px 3px rgba(0,0,0,0.1)':'none',transition:'0.1s',
+                      }}>{label}</button>
+                    ))}
+                  </div>
+
+                  {form.repeat_freq!=='none' && (
+                    <div style={{marginTop:10}}>
+                      <div style={{display:'flex',alignItems:'center',gap:8,fontSize:13}}>
+                        <span>Every</span>
+                        <input type="number" min="1" style={{...S.input,width:56,padding:'6px 8px'}}
+                          value={form.repeat_interval} onChange={set('repeat_interval')}/>
+                        <span>{{daily:'day',weekly:'week',monthly:'month',yearly:'year'}[form.repeat_freq]}{(parseInt(form.repeat_interval,10)||1)===1?'':'s'}</span>
+                      </div>
+
+                      {form.repeat_freq==='weekly' && (
+                        <div style={{marginTop:10}}>
+                          <div style={{display:'flex',gap:4}}>
+                            {['S','M','T','W','T','F','S'].map((d,i)=>(
+                              <button key={i} type="button" onClick={()=>toggleDay(i)} style={{
+                                width:28,height:28,borderRadius:'50%',border:'1px solid var(--border)',cursor:'pointer',
+                                fontSize:12,fontWeight:600,
+                                background:form.repeat_days.has(i)?'var(--accent)':'#fff',
+                                color:form.repeat_days.has(i)?'#fff':'var(--text)',
+                              }}>{d}</button>
+                            ))}
+                          </div>
+                          {weeklyDaysInvalid&&<div style={{color:'#dc2626',fontSize:12,marginTop:6}}>Select at least one day.</div>}
+                          {weeklyStartInvalid&&<div style={{color:'#dc2626',fontSize:12,marginTop:6}}>The start date must fall on one of the selected days.</div>}
+                        </div>
+                      )}
+
+                      <div style={{marginTop:10}}>
+                        <label style={S.label}>Ends</label>
+                        <div style={{display:'flex',background:'var(--bg-subtle)',borderRadius:8,padding:2,gap:1,width:'fit-content'}}>
+                          {[['never','Never'],['on_date','On date'],['after_n','After']].map(([k,label])=>(
+                            <button key={k} type="button" onClick={()=>setForm(f=>({...f,repeat_end:k}))} style={{
+                              padding:'5px 12px',borderRadius:6,border:'none',cursor:'pointer',fontSize:12,fontWeight:500,
+                              background:form.repeat_end===k?'#fff':'transparent',
+                              color:form.repeat_end===k?'var(--text)':'var(--text-muted)',
+                              boxShadow:form.repeat_end===k?'0 1px 3px rgba(0,0,0,0.1)':'none',transition:'0.1s',
+                            }}>{label}</button>
+                          ))}
+                        </div>
+                        {form.repeat_end==='on_date' && (
+                          <input type="date" style={{...S.input,marginTop:8,maxWidth:180}} min={form.start_date}
+                            value={form.repeat_end_date} onChange={set('repeat_end_date')}/>
+                        )}
+                        {form.repeat_end==='after_n' && (
+                          <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8,fontSize:13}}>
+                            <input type="number" min="1" style={{...S.input,width:64,padding:'6px 8px'}}
+                              value={form.repeat_end_count} onChange={set('repeat_end_count')}/>
+                            <span>occurrence{(parseInt(form.repeat_end_count,10)||1)===1?'':'s'}</span>
+                          </div>
+                        )}
+                        {repeatEndInvalid&&<div style={{color:'#dc2626',fontSize:12,marginTop:6}}>Pick an end date on or after the start date.</div>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               <div style={{marginBottom:14}}><label style={S.label}>Location</label><input style={S.input} value={form.location} onChange={set('location')} placeholder="Add location…"/></div>
               <div style={{marginBottom:14}}><label style={S.label}>Description</label><textarea style={{...S.input,height:72,resize:'vertical'}} value={form.description} onChange={set('description')} placeholder="Add description…"/></div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:20}}>
                 <div>
                   <label style={S.label}>Calendar</label>
-                  <select style={S.input} value={form.calendar_id} onChange={set('calendar_id')}>
+                  <select style={{...S.input,opacity:isRecurring?0.6:1}} value={form.calendar_id} onChange={set('calendar_id')} disabled={isRecurring}>
                     {calendars.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
+                  {isRecurring&&<div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>Can't be changed on a recurring series.</div>}
                 </div>
                 <div>
                   <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
@@ -767,16 +1073,50 @@
                     <button type="button" onClick={()=>setNewArea(true)} style={{...S.iconBtn,fontSize:12,padding:'0 2px',color:'var(--accent)',fontWeight:600}}>+ New</button>
                   </div>
                   <select style={S.input} value={form.category_id} onChange={set('category_id')}>
-                    <option value="">None</option>
+                    <option value="" disabled={isRecurring}>None</option>
                     {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
+                  {isRecurring&&<div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>Can't be cleared to None on a recurring series.</div>}
                 </div>
               </div>
+              {isRecurring && (
+                <div style={{marginBottom:20}}>
+                  <label style={S.label}>Apply changes to</label>
+                  <div style={{display:'flex',background:'var(--bg-subtle)',borderRadius:8,padding:2,gap:1}}>
+                    {[['this','This event'],['this_and_following','This and following events'],['all','All events']].map(([k,label])=>(
+                      <button key={k} type="button" onClick={()=>setForm(f=>({...f,edit_scope:k}))} style={{
+                        flex:1,padding:'6px 6px',borderRadius:6,border:'none',cursor:'pointer',fontSize:12,fontWeight:500,
+                        background:form.edit_scope===k?'#fff':'transparent',
+                        color:form.edit_scope===k?'var(--text)':'var(--text-muted)',
+                        boxShadow:form.edit_scope===k?'0 1px 3px rgba(0,0,0,0.1)':'none',transition:'0.1s',
+                      }}>{label}</button>
+                    ))}
+                  </div>
+                  <div style={{fontSize:12,color:'var(--text-muted)',marginTop:6}}>
+                    {form.edit_scope==='all'
+                      ? 'All occurrences will be updated. Occurrences that already started are left as-is.'
+                      : form.edit_scope==='this_and_following'
+                      ? 'This and all future occurrences will be updated.'
+                      : 'Only this occurrence will be updated.'}
+                  </div>
+                </div>
+              )}
               {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14,padding:'8px 10px',background:'#fef2f2',borderRadius:6}}>{err}</div>}
               <div style={{display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap'}}>
-                {isEdit&&<button type="button" onClick={del} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>Delete</button>}
-                <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
-                <button type="submit" disabled={busy||rangeInvalid} style={S.btnPri}>{busy?'Saving…':'Save'}</button>
+                {(isRecurring||isException) && confirmingDelete ? (
+                  <>
+                    <button type="button" onClick={()=>del('this')} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>This event</button>
+                    <button type="button" onClick={()=>del('this_and_following')} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>This and following</button>
+                    <button type="button" onClick={()=>del('all')} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>All events</button>
+                    <button type="button" onClick={()=>setConfirmingDelete(false)} disabled={busy} style={S.btnOut}>Never mind</button>
+                  </>
+                ) : (
+                  <>
+                    {isEdit&&<button type="button" onClick={()=>(isRecurring||isException)?setConfirmingDelete(true):del()} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>{(isRecurring||isException)?'Delete…':'Delete'}</button>}
+                    <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
+                    <button type="submit" disabled={busy||formInvalid} style={S.btnPri}>{busy?'Saving…':'Save'}</button>
+                  </>
+                )}
               </div>
             </form>
             {newArea&&<AreaModal onClose={()=>setNewArea(false)}
@@ -853,13 +1193,13 @@
       },[]);
 
       // load events for current range + selected calendars
-      React.useEffect(()=>{
+      function loadEvents() {
         if(calendars.length===0) return;
         const ids=[...selCals]; if(ids.length===0){setEvts([]);return;}
         let from,to;
         if(view==='month'){
           const s=startOfWeek(startOfMonth(date));
-          from=s.toISOString(); to=addDays(s,41).toISOString();
+          from=s.toISOString(); to=addDays(s,42).toISOString(); // through the grid's 42nd cell
         } else if(view==='week'){
           from=startOfWeek(date).toISOString(); to=endOfWeek(date).toISOString();
         } else {
@@ -867,9 +1207,13 @@
           const e=new Date(date); e.setHours(23,59,59,999);
           from=s.toISOString(); to=e.toISOString();
         }
-        Promise.all(ids.map(id=>api(`/events?calendar_id=${id}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`).then(d=>d||[]).catch(()=>[])))
+        // overlap: also events that started before the range but still run into it — a
+        // multi-day all-day event, or (west of UTC) one stored at UTC midnight of the
+        // first visible day. Views place events by date, so out-of-range days aren't shown.
+        Promise.all(ids.map(id=>api(`/events?calendar_id=${id}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&overlap=true`).then(d=>d||[]).catch(()=>[])))
           .then(r=>{ const seen=new Set(); setEvts(r.flat().filter(e=>{ if(seen.has(e.id)) return false; seen.add(e.id); return true; })); });
-      },[view,date,calendars,selCals]);
+      }
+      React.useEffect(loadEvents,[view,date,calendars,selCals]);
 
       function navigate(dir) {
         setDate(d=>{ const n=new Date(d);
@@ -901,7 +1245,7 @@
       function catDeleted(id){ setCats(cs=>cs.filter(c=>c.id!==id)); setAreaModal(null); }
 
       const visible = events.filter(e=>selCals.has(e.calendar_id));
-      const eventDays = React.useMemo(()=>new Set(events.map(evtKey)),[events]);
+      const eventDays = React.useMemo(()=>new Set(events.flatMap(dayKeys)),[events]);
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
@@ -909,7 +1253,8 @@
             <Header view={view} onView={setView} currentDate={date} onNav={navigate}
               onToday={()=>setDate(new Date())} user={user} onLogout={onLogout}
               search={search} onSearch={v=>{ setSearch(v); setShowSearch(!!v); }}
-              workspace={nav.workspace} onWorkspace={nav.setWorkspace}/>
+              workspace={nav.workspace} onWorkspace={nav.setWorkspace}
+              onLogged={loadEvents}/>
             {showSearch&&(
               <div style={{position:'absolute',right:164,top:'100%',zIndex:400}}>
                 <SearchDropdown query={search} calendars={calendars} categories={cats}
@@ -936,7 +1281,7 @@
             </div>
           </div>
 
-          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} onSave={eventSaved} onDelete={eventDeleted} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
           {newCal&&<NewCalendarModal onSave={calCreated} onClose={()=>setNewCal(false)}/>}
           {areaModal&&<AreaModal area={areaModal==='new'?null:areaModal} onClose={()=>setAreaModal(null)}
             onSaved={cat=>{ catSaved(cat); setAreaModal(null); }} onDeleted={catDeleted}/>}
@@ -977,6 +1322,159 @@
             </div>
             <button onClick={onLogout} style={{...S.btnOut,padding:'4px 10px',fontSize:12}}>Logout</button>
           </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────
+    // TIMER CHIP — start/stop time tracking, shown in every workspace's header
+    // ─────────────────────────────────────────────
+    // A running timer is just an unsent event body parked in localStorage until
+    // Stop POSTs it to /events — this app has no separate time-log entity to write
+    // to. Keyed per user, so it can't leak into another account on the same browser.
+    const timerKey = userId => `tempo_timer:${userId}`;
+    const getTimer = userId => {
+      try {
+        const t = JSON.parse(localStorage.getItem(timerKey(userId)));
+        return (t && t.start_time && !isNaN(new Date(t.start_time).getTime())) ? t : null;
+      } catch { return null; }
+    };
+    const setTimer   = (userId,t) => localStorage.setItem(timerKey(userId), JSON.stringify(t));
+    const clearTimer = userId => localStorage.removeItem(timerKey(userId));
+
+    function TimerChip({ user, onLogged }) {
+      const uid = user?.id;
+      const [categories,setCategories] = React.useState([]);
+      const [running,setRunning]       = React.useState(()=>getTimer(uid));
+      const [now,setNow]               = React.useState(new Date());
+      const [picking,setPicking]       = React.useState(false);
+      const [form,setForm]             = React.useState({category_id:'',title:''});
+      const [busy,setBusy]             = React.useState(false);
+
+      // Refetched each time the picker opens, so areas created or deleted since mount show up.
+      const loadCategories = () => api('/categories').then(d=>setCategories(d||[])).catch(()=>{});
+      React.useEffect(()=>{ loadCategories(); },[]);
+
+      // Follow starts/stops made in other tabs.
+      React.useEffect(()=>{
+        const sync = e => { if(e.key===null || e.key===timerKey(uid)) setRunning(getTimer(uid)); };
+        window.addEventListener('storage', sync);
+        return ()=>window.removeEventListener('storage', sync);
+      },[uid]);
+
+      React.useEffect(()=>{
+        if(!running) return;
+        const id=setInterval(()=>setNow(new Date()),1000);
+        return ()=>clearInterval(id);
+      },[running]);
+
+      // The stored copy is the source of truth: another tab (or this view's previous
+      // chip, mid-Stop) may have logged or replaced the timer this chip is showing.
+      // Returns the stored timer if it's still the one on screen, else resyncs and returns null.
+      function current() {
+        const t=getTimer(uid);
+        if(t && running && t.start_time===running.start_time) return t;
+        setRunning(t); return null;
+      }
+
+      function start(e) {
+        e.preventDefault();
+        setPicking(false);
+        const existing=getTimer(uid);
+        if(existing){ setRunning(existing); return; } // started in another tab — adopt it, don't overwrite
+        const t={ category_id: form.category_id||null, title: form.title.trim(), start_time: new Date().toISOString() };
+        setTimer(uid,t); setRunning(t); setForm({category_id:'',title:''});
+      }
+
+      function discard() {
+        if(!confirm('Discard this timer? The elapsed time will not be logged.')) return;
+        if(!current()) return;
+        clearTimer(uid); setRunning(null);
+      }
+
+      // The localStorage entry is the *only* copy of this session until the POST
+      // succeeds. It's taken out while the POST runs, so no other chip or tab can Stop
+      // (and log) it a second time, and put back if the POST fails — unless a new timer
+      // was started meanwhile — so nothing is lost and Stop/Discard can be retried.
+      async function stop() {
+        const t=current();
+        if(!t) return; // already logged/replaced elsewhere — posting this snapshot would double-count
+        // Stats count whole minutes, so a sub-minute session is almost always a mis-click.
+        if(Date.now()-new Date(t.start_time) < 60000){
+          if(confirm('Less than a minute has passed — discard this timer instead of logging it?') && current()){ clearTimer(uid); setRunning(null); }
+          return;
+        }
+        setBusy(true);
+        clearTimer(uid);
+        const restore=()=>{ if(!getTimer(uid)) setTimer(uid,t); };
+        const areaName=(categories.find(c=>c.id===t.category_id)||{}).name;
+        const body={
+          title: t.title || areaName || 'Session',
+          start_time: t.start_time,
+          end_time: new Date().toISOString(),
+          category_id: t.category_id || null,
+        };
+        try {
+          let saved;
+          try {
+            saved = await api('/events',{method:'POST',body:JSON.stringify(body)});
+          } catch(ex) {
+            // The area was deleted while the timer ran: log the session uncategorized
+            // (what deleting an area does to its existing events) rather than leave it
+            // unloggable, with Discard as the only way out.
+            if(!body.category_id || ex.message!=='category not found') throw ex;
+            saved = await api('/events',{method:'POST',body:JSON.stringify({...body,category_id:null})});
+          }
+          // api() resolves undefined on a 401 while it reloads to the login page — that's
+          // not a save, so keep the stored timer to Stop again after signing back in.
+          if(!saved){ restore(); return; }
+          setRunning(getTimer(uid)); // null, or a timer started elsewhere meanwhile
+          onLogged&&onLogged();
+        } catch(ex) {
+          restore();
+          alert('Could not log session: '+ex.message);
+        } finally { setBusy(false); }
+      }
+
+      const areaColor  = running && (categories.find(c=>c.id===running.category_id)||{}).color;
+      const elapsedSec = running ? Math.max(0, Math.round((now - new Date(running.start_time))/1000)) : 0;
+
+      return (
+        <div style={{position:'relative'}}>
+          {!running && (
+            <button onClick={()=>{ if(!picking) loadCategories(); setPicking(p=>!p); }} style={{...S.btnOut,padding:'5px 12px',fontSize:13}}>
+              <span style={{marginRight:5}}>▶</span>Start timer
+            </button>
+          )}
+          {running && (
+            <div style={{display:'flex',alignItems:'center',gap:6,background:'var(--bg-subtle)',border:'1px solid var(--border)',borderRadius:8,padding:'4px 6px 4px 10px'}}>
+              <span style={{width:8,height:8,borderRadius:'50%',background:areaColor||'#ef4444',flexShrink:0}}/>
+              <span style={{fontFamily:'var(--font-mono)',fontSize:13,fontWeight:600,minWidth:50}} title={running.title||undefined}>{fmtClock(elapsedSec)}</span>
+              <button onClick={stop} disabled={busy} style={{...S.btnPri,padding:'4px 10px',fontSize:12}}>{busy?'Stopping…':'Stop'}</button>
+              <button onClick={discard} disabled={busy} title="Discard without logging" style={{...S.iconBtn,color:'#dc2626',padding:'2px 6px'}}>×</button>
+            </div>
+          )}
+          {picking && !running && (
+            <div style={{position:'absolute',top:'calc(100% + 6px)',left:0,width:260,background:'#fff',border:'1px solid var(--border)',borderRadius:10,boxShadow:'0 8px 24px rgba(0,0,0,0.12)',zIndex:300,padding:14}}>
+              <form onSubmit={start}>
+                <div style={{marginBottom:10}}>
+                  <label style={S.label}>Area</label>
+                  <select style={S.input} value={form.category_id} onChange={e=>setForm(f=>({...f,category_id:e.target.value}))} autoFocus>
+                    <option value="">No area</option>
+                    {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+                <div style={{marginBottom:12}}>
+                  <label style={S.label}>Activity</label>
+                  <input style={S.input} value={form.title} onChange={e=>setForm(f=>({...f,title:e.target.value}))} placeholder="What are you working on? (optional)"/>
+                </div>
+                <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+                  <button type="button" onClick={()=>setPicking(false)} style={S.btnOut}>Cancel</button>
+                  <button type="submit" style={S.btnPri}>Start</button>
+                </div>
+              </form>
+            </div>
+          )}
         </div>
       );
     }
@@ -1049,6 +1547,7 @@
       const [logs,setLogs]=React.useState([]);
       const [stats,setStats]=React.useState(null);
       const [editing,setEditing]=React.useState(null);
+      const [editingStart,setEditingStart]=React.useState(null); // start_time of the entry being edited
       const [form,setForm]=React.useState(blankForm);
       const [err,setErr]=React.useState('');
       const [busy,setBusy]=React.useState(false);
@@ -1073,7 +1572,9 @@
         try {
           const now=new Date();
           const from=period.from;
-          const to=period.to>now?now:period.to; // count elapsed time only, not future plans
+          // count elapsed time only, not future plans. '30 days' ends now, not when it was
+          // picked — otherwise sessions logged since (e.g. via the timer) never show up.
+          const to=(range==='30d'||period.to>now)?now:period.to;
           const cats=await api('/categories'); setAreas(cats||[]);
           const catById={}; (cats||[]).forEach(c=>{ catById[c.id]=c; });
           // Logged sessions = non all-day events within the selected window, up to now.
@@ -1098,8 +1599,20 @@
           // noon would hide a morning entry until 12:00. Backdated days keep
           // noon. Clamp to midnight so an early-morning entry can't spill into
           // the previous day.
-          let start;
-          if(form.date===ymd(new Date())){
+          let start=null;
+          if(editing && editingStart){
+            // Editing keeps the entry's own start (moved to the new date, same time of
+            // day, if the date changed) — re-anchoring would move a real timed session,
+            // e.g. from the timer, to end at the moment of the edit. Unless that puts its
+            // start in the future, where it would drop out of the log (which lists entries
+            // by start, so one still running stays); then anchor it as below.
+            start=new Date(editingStart);
+            if(form.date!==ymd(start)){ const [y,m,d]=form.date.split('-').map(Number); start.setFullYear(y,m-1,d); }
+            if(start.getTime()>Date.now()) start=null;
+          }
+          if(start){
+            // kept from the entry being edited
+          } else if(form.date===ymd(new Date())){
             start=new Date(Date.now()-mins*60000);
             const dayStart=new Date(`${form.date}T00:00:00`);
             if(start<dayStart) start=dayStart;
@@ -1124,7 +1637,7 @@
       }
 
       function startEdit(l) {
-        setEditing(l.id);
+        setEditing(l.id); setEditingStart(l.logged_at);
         setForm({ area_id:l.area_id||'', sub_activity:l.sub_activity||'',
           hours:String(Math.floor(l.duration_minutes/60)), minutes:String(l.duration_minutes%60),
           date:ymd(new Date(l.logged_at)), notes:l.notes||'' });
@@ -1146,7 +1659,9 @@
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
-          <TopBar title="Time Log" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}/>
+          <TopBar title="Time Log" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}>
+            <TimerChip user={user} onLogged={loadAll}/>
+          </TopBar>
           <div style={{flex:1,overflow:'auto',background:'var(--bg-subtle)'}}>
             <div style={{maxWidth:860,margin:'0 auto',padding:'24px 20px 60px'}}>
               <form ref={formRef} onSubmit={submit} style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18,marginBottom:24}}>
@@ -1245,7 +1760,7 @@
             display:'flex',alignItems:'center',justifyContent:'center',
           }}>{task.done&&<span style={{color:'#fff',fontSize:10,fontWeight:700,lineHeight:1}}>✓</span>}</span>
           <span style={{flex:1,fontSize:13,color:task.done?'var(--text-muted)':'var(--text)',textDecoration:task.done?'line-through':'none'}}>{task.title}</span>
-          {task.due_date&&<span style={{fontSize:11,color:'var(--text-muted)'}}>{new Date(task.due_date).toLocaleDateString([],{month:'short',day:'numeric'})}</span>}
+          {task.due_date&&<span style={{fontSize:11,color:'var(--text-muted)'}}>{new Date(task.due_date).toLocaleDateString([],{month:'short',day:'numeric',timeZone:'UTC'})}</span>}
           <button onClick={()=>onDel(task.id)} style={{...S.iconBtn,fontSize:14,color:'var(--text-muted)',padding:'0 4px'}} title="Delete">×</button>
         </div>
       );
@@ -1407,6 +1922,7 @@
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
           <TopBar title="Areas" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}>
+            <TimerChip user={user} onLogged={loadAll}/>
             <button style={S.btnPri} onClick={()=>setEditing('new')}><span style={{fontSize:18,lineHeight:1,marginTop:-1}}>+</span> New area</button>
           </TopBar>
           <div style={{flex:1,overflow:'auto',background:'var(--bg-subtle)'}}>

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	gics "github.com/arran4/golang-ical"
+	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
 )
@@ -44,6 +45,9 @@ func Export(calName string, events []model.Event, recurrings []model.RecurringEv
 			ve.SetEndAt(e.EndTime)
 		}
 		ve.SetSummary(e.Title)
+		if e.Visibility == "private" {
+			ve.SetProperty(gics.ComponentPropertyClass, "PRIVATE")
+		}
 		if e.Description != "" {
 			ve.SetDescription(e.Description)
 		}
@@ -69,6 +73,9 @@ func Export(calName string, events []model.Event, recurrings []model.RecurringEv
 			ve.SetEndAt(endTime)
 		}
 		ve.SetSummary(rec.Title)
+		if rec.Visibility == "private" {
+			ve.SetProperty(gics.ComponentPropertyClass, "PRIVATE")
+		}
 		if rec.Description != "" {
 			ve.SetDescription(rec.Description)
 		}
@@ -79,6 +86,13 @@ func Export(calName string, events []model.Event, recurrings []model.RecurringEv
 			ve.AddAttendee(a)
 		}
 		ve.SetProperty(gics.ComponentPropertyRrule, buildRrule(rec))
+		for _, ex := range rec.Exdates {
+			if rec.AllDay {
+				ve.AddExdate(ex.UTC().Format("20060102"), gics.WithValue(string(gics.ValueDataTypeDate)))
+			} else {
+				ve.AddExdate(ex.UTC().Format("20060102T150405Z"))
+			}
+		}
 	}
 
 	return cal.Serialize()
@@ -99,6 +113,9 @@ func buildRrule(rec model.RecurringEvent) string {
 		if len(days) > 0 {
 			parts = append(parts, "BYDAY="+strings.Join(days, ","))
 		}
+	}
+	if ws := rec.WeekStart; ws != nil && *ws >= 0 && *ws < 7 && *ws != int(time.Monday) {
+		parts = append(parts, "WKST="+weekdayNames[*ws])
 	}
 	// COUNT takes precedence over UNTIL if both are set
 	if rec.MaxOccurrences != nil {
@@ -144,16 +161,24 @@ func Import(calendarID uuid.UUID, r io.Reader) ([]model.CreateEventRequest, []mo
 		for _, a := range ve.Attendees() {
 			email := strings.TrimPrefix(a.Value, "MAILTO:")
 			email = strings.TrimPrefix(email, "mailto:")
-			if email != "" {
+			if validEmail(email) && len(attendees) < maxAttendees {
 				attendees = append(attendees, email)
 			}
 		}
 
 		tz := tzFromProp(ve, gics.ComponentPropertyDtStart)
+		// CLASS:PRIVATE / CONFIDENTIAL events show as "Busy" to others, as they did where
+		// they came from.
+		visibility := "public"
+		switch strings.ToUpper(stringProp(ve, gics.ComponentPropertyClass)) {
+		case "PRIVATE", "CONFIDENTIAL":
+			visibility = "private"
+		}
 
 		if ve.GetProperty(gics.ComponentPropertyRrule) != nil {
 			rec, err := parseRrule(ve, calendarID, title, description, location, start, end, allDay, attendees, tz)
 			if err == nil {
+				rec.Visibility = visibility
 				recurrings = append(recurrings, rec)
 			}
 		} else {
@@ -167,11 +192,24 @@ func Import(calendarID uuid.UUID, r io.Reader) ([]model.CreateEventRequest, []mo
 				Attendees:   attendees,
 				AllDay:      allDay,
 				Timezone:    tz,
+				Visibility:  visibility,
 			})
 		}
 	}
 
 	return events, recurrings, nil
+}
+
+// maxAttendees matches the API's limit on an event's attendees.
+const maxAttendees = 100
+
+var validate = validator.New()
+
+// validEmail reports whether s is an email address by the same rule the API applies to
+// attendees (binding:"email"). Anything else is dropped on import: the API would
+// reject the event on its next edit, and mail to it can only fail.
+func validEmail(s string) bool {
+	return validate.Var(s, "required,email") == nil
 }
 
 func stringProp(ve *gics.VEvent, prop gics.ComponentProperty) string {
@@ -290,6 +328,10 @@ func parseRrule(
 			}
 		}
 	}
+	var weekStart *int // Monday, RFC 5545's default, unless WKST says otherwise
+	if n, ok := weekdayByName[strings.ToUpper(params["WKST"])]; ok && n != int(time.Monday) {
+		weekStart = &n
+	}
 
 	var endDate *time.Time
 	if until := params["UNTIL"]; until != "" {
@@ -309,6 +351,27 @@ func parseRrule(
 		}
 	}
 
+	// EXDATE may repeat and each may list several comma-separated values.
+	var exdates []time.Time
+	for _, p := range ve.Properties {
+		if p.IANAToken != string(gics.ComponentPropertyExdate) {
+			continue
+		}
+		for _, v := range strings.Split(p.Value, ",") {
+			one := p
+			one.Value = strings.TrimSpace(v)
+			var t time.Time
+			if len(one.Value) == 8 { // DATE value, as for all-day series
+				t, _ = time.Parse("20060102", one.Value)
+			} else {
+				t = parseDateTime(&one)
+			}
+			if !t.IsZero() {
+				exdates = append(exdates, t.UTC())
+			}
+		}
+	}
+
 	return model.CreateRecurringEventRequest{
 		CalendarID:     &calendarID,
 		Title:          title,
@@ -324,5 +387,7 @@ func parseRrule(
 		MaxOccurrences: maxOcc,
 		AllDay:         allDay,
 		Timezone:       tz,
+		Exdates:        exdates,
+		WeekStart:      weekStart,
 	}, nil
 }

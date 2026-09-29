@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/repository"
@@ -118,10 +119,12 @@ func TestEventHandler_Create_WithReminders_ScheduledInRedis(t *testing.T) {
 	truncateAll(t, testPool)
 	_, token := MustRegisterAndLogin(t, testRouter, "evh_e")
 
+	// In the future: reminders whose time has already passed aren't queued.
+	start := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Minute)
 	w := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
 		"title":      "Reminder Test",
-		"start_time": "2024-06-15T09:00:00Z",
-		"end_time":   "2024-06-15T10:00:00Z",
+		"start_time": start.Format(time.RFC3339),
+		"end_time":   start.Add(time.Hour).Format(time.RFC3339),
 		"reminders":  []map[string]interface{}{{"minutes": 15, "method": "email"}},
 	})
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -527,4 +530,217 @@ func TestRecurringEventHandler_CategoryValidated(t *testing.T) {
 		"category_id": foreignCat,
 	})
 	assert.Equal(t, http.StatusBadRequest, wUpd.Code, wUpd.Body.String())
+}
+
+func TestRecurringEventHandler_RejectsNonPositiveMaxOccurrences(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "rec_maxocc")
+
+	body := func(n int) map[string]interface{} {
+		return map[string]interface{}{
+			"title":           "Capped",
+			"start_time":      "2024-01-01T09:00:00Z",
+			"end_time":        "2024-01-01T10:00:00Z",
+			"frequency":       "daily",
+			"max_occurrences": n,
+		}
+	}
+	// The cap is enforced, so 0 or less would create a rule with no instances —
+	// invisible in the UI and re-scanned by the scheduler forever.
+	for _, n := range []int{0, -1} {
+		w := Do(t, testRouter, "POST", "/recurring-events", token, body(n))
+		assert.Equal(t, http.StatusBadRequest, w.Code, "max_occurrences=%d: %s", n, w.Body.String())
+	}
+	w := Do(t, testRouter, "POST", "/recurring-events", token, body(1))
+	assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+}
+
+func TestEventHandler_DeleteRecurrence_Scopes(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_delrec")
+
+	type inst struct {
+		ID               uuid.UUID  `json:"id"`
+		RecurringEventID *uuid.UUID `json:"recurring_event_id"`
+	}
+	list := func() []inst {
+		w := Do(t, testRouter, "GET", "/events", token, nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		var out []inst
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&out))
+		return out
+	}
+	w := Do(t, testRouter, "POST", "/recurring-events", token, map[string]interface{}{
+		"title":           "Daily",
+		"start_time":      "2024-01-01T09:00:00Z",
+		"end_time":        "2024-01-01T10:00:00Z",
+		"frequency":       "daily",
+		"max_occurrences": 5,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	all := list()
+	require.Len(t, all, 5)
+
+	del := func(id uuid.UUID, scope string) int {
+		return Do(t, testRouter, "DELETE", fmt.Sprintf("/events/%s/recurrence?scope=%s", id, scope), token, nil).Code
+	}
+	assert.Equal(t, http.StatusBadRequest, del(all[0].ID, "bogus"))
+
+	// "this" removes one; "this_and_following" from #4 removes #4-#5 and keeps the rest.
+	assert.Equal(t, http.StatusNoContent, del(all[1].ID, "this"))
+	assert.Len(t, list(), 4)
+	assert.Equal(t, http.StatusNoContent, del(all[3].ID, "this_and_following"))
+	left := list()
+	require.Len(t, left, 2)
+	assert.Equal(t, all[0].ID, left[0].ID)
+	assert.Equal(t, all[2].ID, left[1].ID)
+
+	// A standalone event isn't part of a series.
+	wOne := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title": "One-off", "start_time": "2024-02-01T09:00:00Z", "end_time": "2024-02-01T10:00:00Z",
+	})
+	require.Equal(t, http.StatusCreated, wOne.Code)
+	var one inst
+	require.NoError(t, json.NewDecoder(wOne.Body).Decode(&one))
+	assert.Equal(t, http.StatusBadRequest, del(one.ID, "all"))
+
+	// "all" removes the series and its remaining instances.
+	assert.Equal(t, http.StatusNoContent, del(left[0].ID, "all"))
+	remaining := list()
+	require.Len(t, remaining, 1)
+	assert.Equal(t, one.ID, remaining[0].ID)
+}
+
+func TestEventHandler_DeleteRecurrence_FromEditedOccurrence(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_delexc")
+
+	type inst struct {
+		ID uuid.UUID `json:"id"`
+	}
+	list := func() []inst {
+		w := Do(t, testRouter, "GET", "/events", token, nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		var out []inst
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&out))
+		return out
+	}
+	move := func(id uuid.UUID, start string) {
+		w := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", id), token, map[string]interface{}{
+			"start_time": start + "T15:00:00Z", "end_time": start + "T16:00:00Z",
+		})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+	del := func(id uuid.UUID, scope string) int {
+		return Do(t, testRouter, "DELETE", fmt.Sprintf("/events/%s/recurrence?scope=%s", id, scope), token, nil).Code
+	}
+	w := Do(t, testRouter, "POST", "/recurring-events", token, map[string]interface{}{
+		"title": "Daily", "start_time": "2024-01-01T09:00:00Z", "end_time": "2024-01-01T10:00:00Z",
+		"frequency": "daily", "max_occurrences": 5,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	all := list()
+	require.Len(t, all, 5)
+
+	// A moved occurrence is still part of the series: "this and following" from it counts
+	// from the occurrence it was (#3), removing it and #4-#5.
+	move(all[2].ID, "2024-01-03")
+	assert.Equal(t, http.StatusNoContent, del(all[2].ID, "this_and_following"))
+	left := list()
+	require.Len(t, left, 2)
+	assert.Equal(t, all[0].ID, left[0].ID)
+	assert.Equal(t, all[1].ID, left[1].ID)
+
+	// And "all" from one deletes the whole series.
+	move(all[0].ID, "2024-01-01")
+	assert.Equal(t, http.StatusNoContent, del(all[0].ID, "all"))
+	assert.Empty(t, list())
+}
+
+func TestEventHandler_Update_DetachesSeriesInstance(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_detach")
+
+	w := Do(t, testRouter, "POST", "/recurring-events", token, map[string]interface{}{
+		"title":           "Daily",
+		"start_time":      "2024-01-01T09:00:00Z",
+		"end_time":        "2024-01-01T10:00:00Z",
+		"frequency":       "daily",
+		"max_occurrences": 3,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var rec struct {
+		ID uuid.UUID `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&rec))
+
+	wList := Do(t, testRouter, "GET", "/events", token, nil)
+	var instances []struct {
+		ID uuid.UUID `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(wList.Body).Decode(&instances))
+	require.Len(t, instances, 3)
+
+	// A plain PUT (drag, Log view edit) makes the instance an exception.
+	wUpd := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", instances[1].ID), token, map[string]interface{}{
+		"start_time": "2024-01-02T11:00:00Z", "end_time": "2024-01-02T12:00:00Z",
+	})
+	require.Equal(t, http.StatusOK, wUpd.Code, wUpd.Body.String())
+	var upd struct {
+		RecurringEventID *uuid.UUID `json:"recurring_event_id"`
+		DetachedFrom     *uuid.UUID `json:"detached_from"`
+	}
+	require.NoError(t, json.NewDecoder(wUpd.Body).Decode(&upd))
+	assert.Nil(t, upd.RecurringEventID)
+	require.NotNil(t, upd.DetachedFrom, "the exception still says which series it belongs to")
+	assert.Equal(t, rec.ID, *upd.DetachedFrom)
+
+	wRec := Do(t, testRouter, "GET", fmt.Sprintf("/recurring-events/%s", rec.ID), token, nil)
+	var got struct {
+		Exdates []time.Time `json:"exdates"`
+	}
+	require.NoError(t, json.NewDecoder(wRec.Body).Decode(&got))
+	require.Len(t, got.Exdates, 1)
+	assert.True(t, got.Exdates[0].Equal(time.Date(2024, 1, 2, 9, 0, 0, 0, time.UTC)), "the original occurrence time is excluded, got %v", got.Exdates[0])
+}
+
+func TestEventHandler_List_Overlap(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_overlap")
+
+	w := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title": "Conference", "start_time": "2026-09-25T00:00:00Z", "end_time": "2026-09-28T23:59:59Z", "all_day": true,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	count := func(q string) int {
+		w := Do(t, testRouter, "GET", "/events?from=2026-09-27T07:00:00Z&to=2026-10-04T06:59:59Z"+q, token, nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		var evs []map[string]any
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&evs))
+		return len(evs)
+	}
+	assert.Equal(t, 0, count(""), "by default only events starting in range")
+	assert.Equal(t, 1, count("&overlap=true"), "a multi-day event still running at the start of the range")
+}
+
+func TestEventHandler_List_GeneratesOccurrencesAhead(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_ahead")
+
+	start := time.Now().UTC().Truncate(time.Hour).Add(time.Hour)
+	w := Do(t, testRouter, "POST", "/recurring-events", token, map[string]interface{}{
+		"title": "Weekly", "start_time": start.Format(time.RFC3339), "end_time": start.Add(time.Hour).Format(time.RFC3339),
+		"frequency": "weekly",
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	// A month about five months out — past the 60-day materialized window.
+	from, to := start.AddDate(0, 5, 0), start.AddDate(0, 6, 0)
+	wList := Do(t, testRouter, "GET", fmt.Sprintf("/events?from=%s&to=%s&overlap=true",
+		from.Format(time.RFC3339), to.Format(time.RFC3339)), token, nil)
+	require.Equal(t, http.StatusOK, wList.Code)
+	var evs []map[string]any
+	require.NoError(t, json.NewDecoder(wList.Body).Decode(&evs))
+	assert.GreaterOrEqual(t, len(evs), 4, "the series' occurrences in that month are generated on demand")
 }

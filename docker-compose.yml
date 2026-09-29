@@ -38,6 +38,7 @@ services:
       DB_PASSWORD: calendar
       DB_NAME: calendar
       REDIS_ADDR: redis:6379
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env - see .env.example}
     depends_on:
       postgres:
         condition: service_healthy

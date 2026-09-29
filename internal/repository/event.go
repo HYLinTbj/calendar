@@ -3,11 +3,13 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,17 +21,17 @@ func NewEventRepository(pool *pgxpool.Pool) *EventRepository {
 	return &EventRepository{pool: pool}
 }
 
-const eventCols = `id, owner_id, calendar_id, title, description, location, start_time, end_time, attendees, reminders, all_day, timezone, category_id, recurring_event_id, visibility, created_at, updated_at`
+const eventCols = `id, owner_id, calendar_id, title, description, location, start_time, end_time, attendees, reminders, all_day, timezone, category_id, recurring_event_id, visibility, created_at, updated_at, detached_from, original_start`
 
 // eventColsJ is for queries that JOIN calendars c ON c.id = e.calendar_id.
 // Appends c.owner_id so callers can apply privacy masking.
-const eventColsJ = `e.id, e.owner_id, e.calendar_id, e.title, e.description, e.location, e.start_time, e.end_time, e.attendees, e.reminders, e.all_day, e.timezone, e.category_id, e.recurring_event_id, e.visibility, e.created_at, e.updated_at, c.owner_id`
+const eventColsJ = `e.id, e.owner_id, e.calendar_id, e.title, e.description, e.location, e.start_time, e.end_time, e.attendees, e.reminders, e.all_day, e.timezone, e.category_id, e.recurring_event_id, e.visibility, e.created_at, e.updated_at, e.detached_from, e.original_start, c.owner_id`
 
 func scanEvent(row interface{ Scan(...any) error }, e *model.Event) error {
 	var remindersRaw []byte
 	err := row.Scan(&e.ID, &e.OwnerID, &e.CalendarID, &e.Title, &e.Description, &e.Location,
 		&e.StartTime, &e.EndTime, &e.Attendees, &remindersRaw, &e.AllDay, &e.Timezone,
-		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt)
+		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt, &e.DetachedFrom, &e.OriginalStart)
 	if err != nil {
 		return err
 	}
@@ -44,7 +46,7 @@ func scanEventJ(row interface{ Scan(...any) error }, e *model.Event) (uuid.UUID,
 	var calOwnerID uuid.UUID
 	err := row.Scan(&e.ID, &e.OwnerID, &e.CalendarID, &e.Title, &e.Description, &e.Location,
 		&e.StartTime, &e.EndTime, &e.Attendees, &remindersRaw, &e.AllDay, &e.Timezone,
-		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt, &calOwnerID)
+		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt, &e.DetachedFrom, &e.OriginalStart, &calOwnerID)
 	if err != nil {
 		return uuid.UUID{}, err
 	}
@@ -70,6 +72,7 @@ func maskIfPrivate(e *model.Event, requesterID, calOwnerID uuid.UUID) {
 	e.Reminders = []model.Reminder{}
 	e.CategoryID = nil
 	e.RecurringEventID = nil
+	e.DetachedFrom, e.OriginalStart = nil, nil
 }
 
 // calAccessFragJ is for queries that already JOIN calendars c ON c.id = e.calendar_id.
@@ -78,6 +81,18 @@ func calAccessFragJ(n int) string {
 	return `(e.owner_id = ` + p + `
 		OR c.owner_id = ` + p + `
 		OR e.calendar_id IN (SELECT calendar_id FROM calendar_shares WHERE shared_with_user_id = ` + p + `))`
+}
+
+// eventWriteAccess is the SQL condition (on the events row, unaliased) for whether user
+// $n may change or delete it: the owner of its calendar may, and so may its author while
+// they still have edit access to that calendar — revoking or downgrading a share revokes
+// it. Editors can't change each other's or the owner's events.
+func eventWriteAccess(n int) string {
+	p := "$" + itoa(n)
+	return `(EXISTS (SELECT 1 FROM calendars c WHERE c.id = events.calendar_id AND c.owner_id = ` + p + `)
+		OR (events.owner_id = ` + p + ` AND EXISTS (
+			SELECT 1 FROM calendar_shares s
+			WHERE s.calendar_id = events.calendar_id AND s.shared_with_user_id = ` + p + ` AND s.permission = 'edit')))`
 }
 
 func marshalReminders(reminders []model.Reminder) []byte {
@@ -123,7 +138,18 @@ func (r *EventRepository) GetByID(ctx context.Context, id, requesterID uuid.UUID
 	return &e, nil
 }
 
+// List returns events starting within [from, to].
 func (r *EventRepository) List(ctx context.Context, ownerID uuid.UUID, calendarID *uuid.UUID, from, to *time.Time) ([]model.Event, error) {
+	return r.list(ctx, ownerID, calendarID, from, to, false)
+}
+
+// ListOverlapping returns events overlapping [from, to] — including ones that started
+// before from, such as a multi-day all-day event, which a calendar view must still draw.
+func (r *EventRepository) ListOverlapping(ctx context.Context, ownerID uuid.UUID, calendarID *uuid.UUID, from, to *time.Time) ([]model.Event, error) {
+	return r.list(ctx, ownerID, calendarID, from, to, true)
+}
+
+func (r *EventRepository) list(ctx context.Context, ownerID uuid.UUID, calendarID *uuid.UUID, from, to *time.Time, overlap bool) ([]model.Event, error) {
 	query := `SELECT ` + eventColsJ + ` FROM events e JOIN calendars c ON c.id = e.calendar_id WHERE ` + calAccessFragJ(1)
 	args := []any{ownerID}
 	i := 2
@@ -134,7 +160,11 @@ func (r *EventRepository) List(ctx context.Context, ownerID uuid.UUID, calendarI
 		i++
 	}
 	if from != nil {
-		query += ` AND e.start_time >= $` + itoa(i)
+		if overlap {
+			query += ` AND e.end_time >= $` + itoa(i)
+		} else {
+			query += ` AND e.start_time >= $` + itoa(i)
+		}
 		args = append(args, from)
 		i++
 	}
@@ -279,6 +309,8 @@ func (r *EventRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req
 	if err != nil {
 		return nil, err
 	}
+	recurringEventID, occurrence := current.RecurringEventID, current.StartTime
+	before := *current
 	if req.CalendarID != nil {
 		current.CalendarID = *req.CalendarID
 	}
@@ -316,30 +348,85 @@ func (r *EventRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req
 		current.Visibility = *req.Visibility
 	}
 
+	// Saving a series instance without changing anything (the modal's Save, a Log-view
+	// re-save) isn't an edit: leave it linked rather than detach it below. It still takes
+	// write access, as an edit would.
+	if recurringEventID != nil && sameEventFields(&before, current) {
+		var ok bool
+		if err := r.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM events WHERE id = $1 AND `+eventWriteAccess(2)+`)`, id, ownerID).Scan(&ok); err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, pgx.ErrNoRows
+		}
+		return current, nil
+	}
+
+	// Editing a series instance on its own makes it an exception: detach it into a
+	// standalone event and add its occurrence time to the series' exdates, so a later
+	// series-wide edit (which regenerates future instances) neither overwrites nor
+	// duplicates it. A linked instance's start_time is always its occurrence time,
+	// since any edit detaches it. The exception keeps a link to its series and that
+	// occurrence (detached_from, original_start; SET sees the pre-update row) so
+	// deleting the series still removes it. The exdate is only recorded if the update
+	// applied.
 	var e model.Event
 	err = scanEvent(r.pool.QueryRow(ctx, `
-		UPDATE events
-		SET calendar_id=$1, title=$2, description=$3, location=$4,
-		    start_time=$5, end_time=$6, attendees=$7, reminders=$8, all_day=$9, timezone=$10, category_id=$11, visibility=$12, updated_at=NOW()
-		WHERE id=$13 AND owner_id=$14
-		RETURNING `+eventCols,
+		WITH upd AS (
+			UPDATE events
+			SET calendar_id=$1, title=$2, description=$3, location=$4,
+			    start_time=$5, end_time=$6, attendees=$7, reminders=$8, all_day=$9, timezone=$10, category_id=$11, visibility=$12,
+			    detached_from = COALESCE(detached_from, recurring_event_id),
+			    original_start = CASE WHEN recurring_event_id IS NOT NULL THEN start_time ELSE original_start END,
+			    recurring_event_id=NULL, updated_at=NOW()
+			WHERE id=$13 AND `+eventWriteAccess(14)+`
+			RETURNING `+eventCols+`
+		), ex AS (
+			UPDATE recurring_events SET exdates = array_append(exdates, $16), updated_at = NOW()
+			WHERE id = $15 AND owner_id = $14 AND EXISTS (SELECT 1 FROM upd)
+		)
+		SELECT `+eventCols+` FROM upd`,
 		current.CalendarID, current.Title, current.Description, current.Location,
 		current.StartTime, current.EndTime, current.Attendees, marshalReminders(current.Reminders),
 		current.AllDay, current.Timezone, current.CategoryID, current.Visibility,
-		id, ownerID), &e)
+		id, ownerID, recurringEventID, occurrence), &e)
 	return &e, err
 }
 
-func (r *EventRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `DELETE FROM events WHERE id = $1 AND owner_id = $2`, id, ownerID)
-	return err
+// sameEventFields reports whether a and b agree on everything Update can change.
+func sameEventFields(a, b *model.Event) bool {
+	return a.CalendarID == b.CalendarID && a.Title == b.Title && a.Description == b.Description &&
+		a.Location == b.Location && a.StartTime.Equal(b.StartTime) && a.EndTime.Equal(b.EndTime) &&
+		slices.Equal(a.Attendees, b.Attendees) && slices.Equal(a.Reminders, b.Reminders) &&
+		a.AllDay == b.AllDay && a.Timezone == b.Timezone && a.Visibility == b.Visibility &&
+		((a.CategoryID == nil && b.CategoryID == nil) ||
+			(a.CategoryID != nil && b.CategoryID != nil && *a.CategoryID == *b.CategoryID))
 }
 
-// DetachInstance clears recurring_event_id on an event, making it a standalone event.
-func (r *EventRepository) DetachInstance(ctx context.Context, id, ownerID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE events SET recurring_event_id = NULL WHERE id = $1 AND owner_id = $2`, id, ownerID)
-	return err
+// Delete removes an event, returning pgx.ErrNoRows if the caller may not (see
+// eventWriteAccess) or there's no such event.
+// Deleting a series instance records its occurrence time in the series' exdates so the
+// series never regenerates it.
+func (r *EventRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) error {
+	var deleted int
+	err := r.pool.QueryRow(ctx, `
+		WITH del AS (
+			DELETE FROM events WHERE id = $1 AND `+eventWriteAccess(2)+`
+			RETURNING recurring_event_id, start_time
+		), ex AS (
+			UPDATE recurring_events r SET exdates = array_append(r.exdates, del.start_time), updated_at = NOW()
+			FROM del WHERE r.id = del.recurring_event_id
+		)
+		SELECT count(*) FROM del`,
+		id, ownerID).Scan(&deleted)
+	if err != nil {
+		return err
+	}
+	if deleted == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 // Stats aggregates time spent over [from, to), grouped by Area (category) and
