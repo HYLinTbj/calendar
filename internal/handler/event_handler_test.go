@@ -611,6 +611,52 @@ func TestEventHandler_DeleteRecurrence_Scopes(t *testing.T) {
 	assert.Equal(t, one.ID, remaining[0].ID)
 }
 
+func TestEventHandler_DeleteRecurrence_FromEditedOccurrence(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_delexc")
+
+	type inst struct {
+		ID uuid.UUID `json:"id"`
+	}
+	list := func() []inst {
+		w := Do(t, testRouter, "GET", "/events", token, nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		var out []inst
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&out))
+		return out
+	}
+	move := func(id uuid.UUID, start string) {
+		w := Do(t, testRouter, "PUT", fmt.Sprintf("/events/%s", id), token, map[string]interface{}{
+			"start_time": start + "T15:00:00Z", "end_time": start + "T16:00:00Z",
+		})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+	del := func(id uuid.UUID, scope string) int {
+		return Do(t, testRouter, "DELETE", fmt.Sprintf("/events/%s/recurrence?scope=%s", id, scope), token, nil).Code
+	}
+	w := Do(t, testRouter, "POST", "/recurring-events", token, map[string]interface{}{
+		"title": "Daily", "start_time": "2024-01-01T09:00:00Z", "end_time": "2024-01-01T10:00:00Z",
+		"frequency": "daily", "max_occurrences": 5,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	all := list()
+	require.Len(t, all, 5)
+
+	// A moved occurrence is still part of the series: "this and following" from it counts
+	// from the occurrence it was (#3), removing it and #4-#5.
+	move(all[2].ID, "2024-01-03")
+	assert.Equal(t, http.StatusNoContent, del(all[2].ID, "this_and_following"))
+	left := list()
+	require.Len(t, left, 2)
+	assert.Equal(t, all[0].ID, left[0].ID)
+	assert.Equal(t, all[1].ID, left[1].ID)
+
+	// And "all" from one deletes the whole series.
+	move(all[0].ID, "2024-01-01")
+	assert.Equal(t, http.StatusNoContent, del(all[0].ID, "all"))
+	assert.Empty(t, list())
+}
+
 func TestEventHandler_Update_DetachesSeriesInstance(t *testing.T) {
 	truncateAll(t, testPool)
 	_, token := MustRegisterAndLogin(t, testRouter, "evh_detach")
@@ -642,9 +688,12 @@ func TestEventHandler_Update_DetachesSeriesInstance(t *testing.T) {
 	require.Equal(t, http.StatusOK, wUpd.Code, wUpd.Body.String())
 	var upd struct {
 		RecurringEventID *uuid.UUID `json:"recurring_event_id"`
+		DetachedFrom     *uuid.UUID `json:"detached_from"`
 	}
 	require.NoError(t, json.NewDecoder(wUpd.Body).Decode(&upd))
 	assert.Nil(t, upd.RecurringEventID)
+	require.NotNil(t, upd.DetachedFrom, "the exception still says which series it belongs to")
+	assert.Equal(t, rec.ID, *upd.DetachedFrom)
 
 	wRec := Do(t, testRouter, "GET", fmt.Sprintf("/recurring-events/%s", rec.ID), token, nil)
 	var got struct {

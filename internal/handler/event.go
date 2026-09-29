@@ -500,7 +500,13 @@ func (h *EventHandler) DeleteRecurrence(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	if instance.RecurringEventID == nil {
+	// An occurrence edited on its own is still part of its series; "this and following"
+	// counts from the occurrence it was.
+	seriesID, occurrence := instance.RecurringEventID, instance.StartTime
+	if seriesID == nil && instance.DetachedFrom != nil && instance.OriginalStart != nil {
+		seriesID, occurrence = instance.DetachedFrom, *instance.OriginalStart
+	}
+	if seriesID == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "event is not part of a recurring series"})
 		return
 	}
@@ -517,9 +523,9 @@ func (h *EventHandler) DeleteRecurrence(c *gin.Context) {
 			}
 		}
 	case "this_and_following":
-		err = h.recurringRepo.TruncateAt(ctx, *instance.RecurringEventID, ownerID, instance.StartTime)
+		err = h.recurringRepo.TruncateAt(ctx, *seriesID, ownerID, occurrence)
 	case "all":
-		err = h.recurringRepo.Delete(ctx, *instance.RecurringEventID, ownerID)
+		err = h.recurringRepo.Delete(ctx, *seriesID, ownerID)
 	}
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "recurring series not found"})

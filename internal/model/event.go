@@ -38,8 +38,13 @@ type Event struct {
 	Visibility       string           `json:"visibility"` // "public" | "private"
 	CategoryID       *uuid.UUID       `json:"category_id,omitempty"`
 	RecurringEventID *uuid.UUID       `json:"recurring_event_id,omitempty"`
-	CreatedAt        time.Time        `json:"created_at"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	// DetachedFrom is the series an occurrence edited on its own came from: it's no longer
+	// linked (RecurringEventID is nil), but still part of that series, which deletes it.
+	DetachedFrom *uuid.UUID `json:"detached_from,omitempty"`
+	// OriginalStart is the occurrence it was, where DetachedFrom is set.
+	OriginalStart *time.Time `json:"-"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 type CreateEventRequest struct {

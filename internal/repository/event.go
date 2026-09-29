@@ -21,17 +21,17 @@ func NewEventRepository(pool *pgxpool.Pool) *EventRepository {
 	return &EventRepository{pool: pool}
 }
 
-const eventCols = `id, owner_id, calendar_id, title, description, location, start_time, end_time, attendees, reminders, all_day, timezone, category_id, recurring_event_id, visibility, created_at, updated_at`
+const eventCols = `id, owner_id, calendar_id, title, description, location, start_time, end_time, attendees, reminders, all_day, timezone, category_id, recurring_event_id, visibility, created_at, updated_at, detached_from, original_start`
 
 // eventColsJ is for queries that JOIN calendars c ON c.id = e.calendar_id.
 // Appends c.owner_id so callers can apply privacy masking.
-const eventColsJ = `e.id, e.owner_id, e.calendar_id, e.title, e.description, e.location, e.start_time, e.end_time, e.attendees, e.reminders, e.all_day, e.timezone, e.category_id, e.recurring_event_id, e.visibility, e.created_at, e.updated_at, c.owner_id`
+const eventColsJ = `e.id, e.owner_id, e.calendar_id, e.title, e.description, e.location, e.start_time, e.end_time, e.attendees, e.reminders, e.all_day, e.timezone, e.category_id, e.recurring_event_id, e.visibility, e.created_at, e.updated_at, e.detached_from, e.original_start, c.owner_id`
 
 func scanEvent(row interface{ Scan(...any) error }, e *model.Event) error {
 	var remindersRaw []byte
 	err := row.Scan(&e.ID, &e.OwnerID, &e.CalendarID, &e.Title, &e.Description, &e.Location,
 		&e.StartTime, &e.EndTime, &e.Attendees, &remindersRaw, &e.AllDay, &e.Timezone,
-		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt)
+		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt, &e.DetachedFrom, &e.OriginalStart)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func scanEventJ(row interface{ Scan(...any) error }, e *model.Event) (uuid.UUID,
 	var calOwnerID uuid.UUID
 	err := row.Scan(&e.ID, &e.OwnerID, &e.CalendarID, &e.Title, &e.Description, &e.Location,
 		&e.StartTime, &e.EndTime, &e.Attendees, &remindersRaw, &e.AllDay, &e.Timezone,
-		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt, &calOwnerID)
+		&e.CategoryID, &e.RecurringEventID, &e.Visibility, &e.CreatedAt, &e.UpdatedAt, &e.DetachedFrom, &e.OriginalStart, &calOwnerID)
 	if err != nil {
 		return uuid.UUID{}, err
 	}
@@ -72,6 +72,7 @@ func maskIfPrivate(e *model.Event, requesterID, calOwnerID uuid.UUID) {
 	e.Reminders = []model.Reminder{}
 	e.CategoryID = nil
 	e.RecurringEventID = nil
+	e.DetachedFrom, e.OriginalStart = nil, nil
 }
 
 // calAccessFragJ is for queries that already JOIN calendars c ON c.id = e.calendar_id.
