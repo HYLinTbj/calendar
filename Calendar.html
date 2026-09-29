@@ -214,12 +214,14 @@
 
     // Per-browser visibility of Areas in the calendar views ('none' = events
     // without an Area). A convenience, so storage failures just mean "all shown".
-    const HIDDEN_AREAS_KEY='tempo_hidden_areas';
-    function loadHiddenAreas() {
-      try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_AREAS_KEY)||'[]')); } catch { return new Set(); }
+    // Kept per user, like the timer: 'none' would otherwise carry over to whoever
+    // signs in next on this browser.
+    const hiddenAreasKey = userId => `tempo_hidden_areas:${userId}`;
+    function loadHiddenAreas(userId) {
+      try { return new Set(JSON.parse(localStorage.getItem(hiddenAreasKey(userId))||'[]')); } catch { return new Set(); }
     }
-    function saveHiddenAreas(s) {
-      try { localStorage.setItem(HIDDEN_AREAS_KEY, JSON.stringify([...s])); } catch {}
+    function saveHiddenAreas(userId, s) {
+      try { localStorage.setItem(hiddenAreasKey(userId), JSON.stringify([...s])); } catch {}
     }
 
     // ─────────────────────────────────────────────
@@ -1281,7 +1283,7 @@
       const [rawCats,setCats]= React.useState([]);
       const [groups,setGroups]= React.useState([]);
       const [events,setEvts] = React.useState([]);
-      const [hiddenAreas,setHiddenAreas]=React.useState(loadHiddenAreas);
+      const [hiddenAreas,setHiddenAreas]=React.useState(()=>loadHiddenAreas(user?.id));
       const [selCals,setSel] = React.useState(new Set());
       const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
       const [newCal,setNewCal]= React.useState(false);
@@ -1356,7 +1358,7 @@
       // Deleting a group ungroups its Areas server-side; reload them to match.
       function groupDeleted(){ setGroupModal(null); loadAreas(); }
       function toggleAreas(ids, hide){
-        setHiddenAreas(h=>{ const n=new Set(h); ids.forEach(id=>hide?n.add(id):n.delete(id)); saveHiddenAreas(n); return n; });
+        setHiddenAreas(h=>{ const n=new Set(h); ids.forEach(id=>hide?n.add(id):n.delete(id)); saveHiddenAreas(user?.id, n); return n; });
       }
 
       // An event tagged with someone else's Area (in a shared calendar) has none of
@@ -1477,7 +1479,8 @@
       const [busy,setBusy]             = React.useState(false);
 
       // Refetched each time the picker opens, so areas created or deleted since mount show up.
-      const loadCategories = () => Promise.all([api('/categories'), api('/category-groups')])
+      // Groups only arrange the list, so if they fail to load the areas still show, ungrouped.
+      const loadCategories = () => Promise.all([api('/categories'), api('/category-groups').catch(()=>[])])
         .then(([cs,gs])=>{ setGroups(gs||[]); setCategories(resolveAreas(cs||[], gs||[])); }).catch(()=>{});
       React.useEffect(()=>{ loadCategories(); },[]);
 
