@@ -157,13 +157,71 @@
       return body;
     }
 
+    // An Area in a category group shows the group's colour; an ungrouped Area
+    // keeps its own. resolveAreas stamps that as display_color so views that
+    // only receive the categories list don't need the groups too.
+    function resolveAreas(categories=[], groups=[]) {
+      const gById={}; groups.forEach(g=>{ gById[g.id]=g; });
+      return categories.map(c=>{ const g=c.group_id?gById[c.group_id]:null; return {...c, display_color:g?.color||c.color}; });
+    }
+    function areaColor(c) { return c?.display_color || c?.color || '#cbd5e1'; }
+
+    // Group Areas for display: one section per group (by position, then name),
+    // then a trailing { group:null } section for ungrouped Areas. Groups with no
+    // Areas still get a section so they can be filled from the sidebar.
+    function groupAreas(categories=[], groups=[]) {
+      const ids=new Set(groups.map(g=>g.id));
+      const sections=groups.map(g=>({ group:g, areas:categories.filter(c=>c.group_id===g.id) }));
+      const loose=categories.filter(c=>!c.group_id||!ids.has(c.group_id));
+      if(loose.length) sections.push({ group:null, areas:loose });
+      return sections;
+    }
+
+    function getEventArea(evt, categories=[]) {
+      return evt.category_id ? categories.find(x=>x.id===evt.category_id) : null;
+    }
     function getEventColor(evt, calendars=[], categories=[]) {
-      if (evt.category_id) {
-        const c = categories.find(x=>x.id===evt.category_id);
-        if (c?.color) return c.color;
-      }
+      const c = getEventArea(evt, categories);
+      if (c) return areaColor(c);
       const cal = calendars.find(x=>x.id===evt.calendar_id);
       return cal?.color || 'var(--accent)';
+    }
+
+    // Short Area code ("FR"). `onColor` renders it for placement on a filled
+    // event chip (translucent white) instead of as a solid coloured badge.
+    function AreaBadge({ area, onColor=false, size=10 }) {
+      if(!area?.code) return null;
+      return (
+        <span style={{
+          display:'inline-block',flexShrink:0,padding:'0 4px',borderRadius:3,
+          fontSize:size,lineHeight:`${size+5}px`,fontWeight:700,letterSpacing:'0.04em',
+          background:onColor?'rgba(255,255,255,0.28)':areaColor(area),color:'#fff',
+          fontFamily:'var(--font-mono)',verticalAlign:'1px',
+        }}>{area.code}</span>
+      );
+    }
+
+    // <option>s for an Area <select>, in <optgroup>s per category group.
+    function areaOptions(categories=[], groups=[]) {
+      const label=c=>c.code?`${c.code} · ${c.name}`:c.name;
+      return groupAreas(categories, groups).filter(s=>s.areas.length).map(s=>{
+        const opts=s.areas.map(c=><option key={c.id} value={c.id}>{label(c)}</option>);
+        return groups.length
+          ? <optgroup key={s.group?.id||'none'} label={s.group?.name||'Ungrouped'}>{opts}</optgroup>
+          : opts;
+      });
+    }
+
+    // Per-browser visibility of Areas in the calendar views ('none' = events
+    // without an Area). A convenience, so storage failures just mean "all shown".
+    // Kept per user, like the timer: 'none' would otherwise carry over to whoever
+    // signs in next on this browser.
+    const hiddenAreasKey = userId => `tempo_hidden_areas:${userId}`;
+    function loadHiddenAreas(userId) {
+      try { return new Set(JSON.parse(localStorage.getItem(hiddenAreasKey(userId))||'[]')); } catch { return new Set(); }
+    }
+    function saveHiddenAreas(userId, s) {
+      try { localStorage.setItem(hiddenAreasKey(userId), JSON.stringify([...s])); } catch {}
     }
 
     // ─────────────────────────────────────────────
@@ -272,7 +330,7 @@
     // ─────────────────────────────────────────────
     // SIDEBAR
     // ─────────────────────────────────────────────
-    function Sidebar({ currentDate, onDateSelect, calendars, selCals, onToggleCal, categories, eventDays, onNewEvent, onNewCalendar, onNewArea, onEditArea }) {
+    function Sidebar({ currentDate, onDateSelect, calendars, selCals, onToggleCal, categories, groups, hiddenAreas, onToggleAreas, eventDays, onNewEvent, onNewCalendar, onNewArea, onEditArea, onNewGroup, onEditGroup }) {
       return (
         <div style={{width:'var(--sidebar-width)',borderRight:'1px solid var(--border)',background:'#fff',display:'flex',flexDirection:'column',flexShrink:0,overflowY:'auto'}}>
           <div style={{padding:'16px 12px 0'}}>
@@ -307,24 +365,65 @@
             ))}
           </div>
 
-          <div style={{padding:'0 10px',marginTop:8}}>
+          <div style={{padding:'0 10px',marginTop:8,paddingBottom:16}}>
             <div style={{fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.05em',padding:'6px 4px 4px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
               <span>Areas</span>
-              <button onClick={onNewArea} style={{...S.iconBtn,fontSize:18,padding:'2px 6px'}} title="New area">+</button>
+              <span style={{display:'flex',gap:2}}>
+                <button onClick={onNewGroup} style={{...S.iconBtn,fontSize:11,fontWeight:600,padding:'2px 6px'}} title="New group">+ Group</button>
+                <button onClick={()=>onNewArea(null)} style={{...S.iconBtn,fontSize:18,padding:'2px 6px'}} title="New area">+</button>
+              </span>
             </div>
-            {categories.map(cat=>(
-              <div key={cat.id} onClick={()=>onEditArea(cat)} title="Edit area"
-                style={{display:'flex',alignItems:'center',gap:8,padding:'4px 4px',fontSize:13,cursor:'pointer',borderRadius:6,userSelect:'none'}}
-                onMouseEnter={e=>e.currentTarget.style.background='var(--bg-subtle)'}
-                onMouseLeave={e=>e.currentTarget.style.background=''}>
-                <span style={{width:10,height:10,borderRadius:'50%',background:cat.color||'#999',flexShrink:0}}/>
-                <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{cat.name}</span>
-                <span style={{fontSize:12,color:'var(--text-muted)'}}>✎</span>
-              </div>
-            ))}
-            {categories.length===0&&<div style={{fontSize:12,color:'var(--text-muted)',padding:'2px 4px 6px'}}>No areas yet</div>}
+            {groupAreas(categories,groups).map(({group,areas})=>{
+              const ids=areas.map(a=>a.id);
+              const shown=ids.filter(id=>!hiddenAreas.has(id)).length;
+              const nested=!!group;
+              return (
+                <div key={group?.id||'none'} style={{marginBottom:4}}>
+                  {group&&(
+                    <div style={{display:'flex',alignItems:'center',gap:8,padding:'5px 4px 3px',fontSize:13,fontWeight:600}}>
+                      <VisBox color={group.color} checked={ids.length>0&&shown===ids.length} partial={shown>0&&shown<ids.length}
+                        disabled={ids.length===0} label={`Show ${group.name}`} onClick={()=>onToggleAreas(ids, shown>0)}/>
+                      <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{group.name}</span>
+                      <button onClick={()=>onEditGroup(group)} style={{...S.iconBtn,fontSize:12,padding:'0 4px'}} title={`Edit group ${group.name}`} aria-label={`Edit group ${group.name}`}>✎</button>
+                      <button onClick={()=>onNewArea(group.id)} style={{...S.iconBtn,fontSize:16,padding:'0 4px'}} title={`Add area to ${group.name}`} aria-label={`Add area to ${group.name}`}>+</button>
+                    </div>
+                  )}
+                  {!group&&groups.length>0&&<div style={{fontSize:11,color:'var(--text-muted)',padding:'6px 4px 2px'}}>Ungrouped</div>}
+                  {areas.map(cat=>(
+                    <div key={cat.id} style={{display:'flex',alignItems:'center',gap:8,padding:`3px 4px 3px ${nested?22:4}px`,fontSize:13,borderRadius:6,userSelect:'none'}}>
+                      <VisBox color={areaColor(cat)} checked={!hiddenAreas.has(cat.id)} label={`Show ${cat.name}`} onClick={()=>onToggleAreas([cat.id], !hiddenAreas.has(cat.id))}/>
+                      <AreaBadge area={cat}/>
+                      <span onClick={()=>onEditArea(cat)} title="Edit area" style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',cursor:'pointer'}}>{cat.name}</span>
+                    </div>
+                  ))}
+                  {group&&areas.length===0&&<div style={{fontSize:12,color:'var(--text-muted)',padding:'2px 4px 4px 22px'}}>No areas yet</div>}
+                </div>
+              );
+            })}
+            {categories.length===0&&groups.length===0&&<div style={{fontSize:12,color:'var(--text-muted)',padding:'2px 4px 6px'}}>No areas yet</div>}
+            <div style={{display:'flex',alignItems:'center',gap:8,padding:'5px 4px',fontSize:13,color:'var(--text-muted)',borderTop:'1px solid var(--border)',marginTop:6}}>
+              <VisBox color="#9ca3af" checked={!hiddenAreas.has('none')} label="Show events without an area" onClick={()=>onToggleAreas(['none'], !hiddenAreas.has('none'))}/>
+              <span>No area</span>
+            </div>
           </div>
         </div>
+      );
+    }
+
+    // Sidebar show/hide checkbox, styled like the calendar toggles. `partial`
+    // marks a group whose Areas are only partly shown.
+    function VisBox({ color, checked, partial=false, disabled=false, label, onClick }) {
+      const on=checked||partial;
+      return (
+        <button type="button" role="checkbox" aria-checked={partial?'mixed':checked} aria-label={label} title={label}
+          disabled={disabled} onClick={onClick} style={{
+            width:14,height:14,padding:0,borderRadius:3,flexShrink:0,cursor:disabled?'default':'pointer',
+            background:on?color:'transparent',border:`2px solid ${color}`,opacity:disabled?0.4:1,
+            display:'flex',alignItems:'center',justifyContent:'center',boxSizing:'border-box',
+          }}>
+          {checked&&<span style={{color:'#fff',fontSize:8,lineHeight:1,fontWeight:700}}>✓</span>}
+          {partial&&!checked&&<span style={{width:6,height:2,background:'#fff',borderRadius:1}}/>}
+        </button>
       );
     }
 
@@ -437,6 +536,7 @@
                         fontSize:11,fontWeight:500,marginBottom:2,
                         overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis',cursor:'pointer',
                       }}>
+                        {getEventArea(evt,categories)?.code&&<span style={{marginRight:4}}><AreaBadge area={getEventArea(evt,categories)} onColor size={9}/></span>}
                         {!evt.all_day&&evtKey(evt)===k&&<span style={{marginRight:3,opacity:0.85}}>{fmtTime(evt.start_time)}</span>}
                         <SeriesMark evt={evt}/>
                         {evt.title}
@@ -671,6 +771,7 @@
                       return dayEvts.map(sg=>{
                         const evt=sg.evt;
                         const col=getEventColor(evt,calendars,categories);
+                        const area=getEventArea(evt,categories);
                         const dragging=!!evt._drag;
                         // Dragging moves the event within one day, so one spanning midnight is
                         // rescheduled from the editor instead.
@@ -679,7 +780,9 @@
                           <div key={evt.id} style={{...evStyle(sg,col,lay[evt.id],dragging,draggable),...(dragging?{pointerEvents:'none'}:null)}}
                                onPointerDown={dragging||!draggable?undefined:e=>onEventDown(e,evt,di)}
                                onClick={e=>{ e.stopPropagation(); if(Date.now()-suppressClick.current<300) return; onEventClick(evt); }}>
-                            <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}><SeriesMark evt={evt}/>{evt.title}</div>
+                            <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>
+                              {area?.code&&<span style={{marginRight:4}}><AreaBadge area={area} onColor size={9}/></span>}<SeriesMark evt={evt}/>{evt.title}
+                            </div>
                             <div style={{opacity:0.85,fontSize:10}}>{sg.before
                               ? (sg.after ? `from ${fmtTime(evt.start_time)}` : `until ${fmtTime(evt.end_time)}`)
                               : fmtTime(evt.start_time)}</div>
@@ -741,7 +844,7 @@
     // ─────────────────────────────────────────────
     // EVENT MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function EventModal({ event, defaultDate, calendars, categories, onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
+    function EventModal({ event, defaultDate, calendars, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
       const isEdit = !!event?.id;
       const isRecurring = isEdit && !!event.recurring_event_id;
       // Edited on its own: no longer linked, but still part of its series, so it can delete
@@ -1074,7 +1177,7 @@
                   </div>
                   <select style={S.input} value={form.category_id} onChange={set('category_id')}>
                     <option value="" disabled={isRecurring}>None</option>
-                    {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                    {areaOptions(categories,groups)}
                   </select>
                   {isRecurring&&<div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>Can't be cleared to None on a recurring series.</div>}
                 </div>
@@ -1119,7 +1222,7 @@
                 )}
               </div>
             </form>
-            {newArea&&<AreaModal onClose={()=>setNewArea(false)}
+            {newArea&&<AreaModal groups={groups} onClose={()=>setNewArea(false)}
               onSaved={cat=>{ onCategoryCreated&&onCategoryCreated(cat); setForm(f=>({...f,category_id:cat.id})); setNewArea(false); }}/>}
           </div>
         </div>
@@ -1177,20 +1280,28 @@
       const [view,setView]   = React.useState('month');
       const [date,setDate]   = React.useState(new Date());
       const [calendars,setCals] = React.useState([]);
-      const [cats,setCats]   = React.useState([]);
+      const [rawCats,setCats]= React.useState([]);
+      const [groups,setGroups]= React.useState([]);
       const [events,setEvts] = React.useState([]);
+      const [hiddenAreas,setHiddenAreas]=React.useState(()=>loadHiddenAreas(user?.id));
       const [selCals,setSel] = React.useState(new Set());
       const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
       const [newCal,setNewCal]= React.useState(false);
-      const [areaModal,setAreaModal]=React.useState(null); // 'new' | area | null
+      const [areaModal,setAreaModal]=React.useState(null); // {groupId} for new | area | null
+      const [groupModal,setGroupModal]=React.useState(null); // 'new' | group | null
       const [search,setSearch]= React.useState('');
       const [showSearch,setShowSearch]=React.useState(false);
 
       // load catalogs once
       React.useEffect(()=>{
         api('/calendars').then(d=>{ const cs=d||[]; setCals(cs); setSel(new Set(cs.map(c=>c.id))); }).catch(()=>{});
-        api('/categories').then(d=>setCats(d||[])).catch(()=>{});
+        loadAreas();
       },[]);
+      function loadAreas(){
+        api('/categories').then(d=>setCats(d||[])).catch(()=>{});
+        api('/category-groups').then(d=>setGroups(d||[])).catch(()=>{});
+      }
+      const cats = React.useMemo(()=>resolveAreas(rawCats,groups),[rawCats,groups]);
 
       // load events for current range + selected calendars
       function loadEvents() {
@@ -1243,9 +1354,20 @@
       function calCreated(c){ setCals(cs=>[...cs,c]); setSel(s=>new Set([...s,c.id])); setNewCal(false); }
       function catSaved(cat){ setCats(cs=>{ const i=cs.findIndex(c=>c.id===cat.id); return i>=0?[...cs.slice(0,i),cat,...cs.slice(i+1)]:[...cs,cat]; }); }
       function catDeleted(id){ setCats(cs=>cs.filter(c=>c.id!==id)); setAreaModal(null); }
+      function groupSaved(g){ setGroups(gs=>{ const i=gs.findIndex(x=>x.id===g.id); return i>=0?[...gs.slice(0,i),g,...gs.slice(i+1)]:[...gs,g]; }); setGroupModal(null); }
+      // Deleting a group ungroups its Areas server-side; reload them to match.
+      function groupDeleted(){ setGroupModal(null); loadAreas(); }
+      function toggleAreas(ids, hide){
+        setHiddenAreas(h=>{ const n=new Set(h); ids.forEach(id=>hide?n.add(id):n.delete(id)); saveHiddenAreas(user?.id, n); return n; });
+      }
 
-      const visible = events.filter(e=>selCals.has(e.calendar_id));
-      const eventDays = React.useMemo(()=>new Set(events.flatMap(dayKeys)),[events]);
+      // An event tagged with someone else's Area (in a shared calendar) has none of
+      // ours: it's coloured by its calendar, so it's shown and hidden with "No area".
+      const visible = React.useMemo(()=>{
+        const mine=new Set(cats.map(c=>c.id));
+        return events.filter(e=>selCals.has(e.calendar_id) && !hiddenAreas.has(mine.has(e.category_id)?e.category_id:'none'));
+      },[events,selCals,hiddenAreas,cats]);
+      const eventDays = React.useMemo(()=>new Set(visible.flatMap(dayKeys)),[visible]);
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
@@ -1268,11 +1390,13 @@
             <Sidebar currentDate={date}
               onDateSelect={d=>{ setDate(d); setView('day'); }}
               calendars={calendars} selCals={selCals} onToggleCal={toggleCal}
-              categories={cats} eventDays={eventDays}
+              categories={cats} groups={groups} hiddenAreas={hiddenAreas} onToggleAreas={toggleAreas} eventDays={eventDays}
               onNewEvent={()=>setModal({defaultDate:date})}
               onNewCalendar={()=>setNewCal(true)}
-              onNewArea={()=>setAreaModal('new')}
-              onEditArea={a=>setAreaModal(a)}/>
+              onNewArea={groupId=>setAreaModal({groupId})}
+              onEditArea={a=>setAreaModal(a)}
+              onNewGroup={()=>setGroupModal('new')}
+              onEditGroup={g=>setGroupModal(g)}/>
 
             <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               {view==='month'&&<MonthView currentDate={date} events={visible} calendars={calendars} categories={cats} onDayClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
@@ -1281,10 +1405,12 @@
             </div>
           </div>
 
-          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
           {newCal&&<NewCalendarModal onSave={calCreated} onClose={()=>setNewCal(false)}/>}
-          {areaModal&&<AreaModal area={areaModal==='new'?null:areaModal} onClose={()=>setAreaModal(null)}
+          {areaModal&&<AreaModal area={areaModal.id?areaModal:null} defaultGroupId={areaModal.groupId} groups={groups} onClose={()=>setAreaModal(null)}
             onSaved={cat=>{ catSaved(cat); setAreaModal(null); }} onDeleted={catDeleted}/>}
+          {groupModal&&<GroupModal group={groupModal==='new'?null:groupModal} groups={groups} onClose={()=>setGroupModal(null)}
+            onSaved={groupSaved} onDeleted={groupDeleted}/>}
         </div>
       );
     }
@@ -1345,6 +1471,7 @@
     function TimerChip({ user, onLogged }) {
       const uid = user?.id;
       const [categories,setCategories] = React.useState([]);
+      const [groups,setGroups]         = React.useState([]);
       const [running,setRunning]       = React.useState(()=>getTimer(uid));
       const [now,setNow]               = React.useState(new Date());
       const [picking,setPicking]       = React.useState(false);
@@ -1352,7 +1479,9 @@
       const [busy,setBusy]             = React.useState(false);
 
       // Refetched each time the picker opens, so areas created or deleted since mount show up.
-      const loadCategories = () => api('/categories').then(d=>setCategories(d||[])).catch(()=>{});
+      // Groups only arrange the list, so if they fail to load the areas still show, ungrouped.
+      const loadCategories = () => Promise.all([api('/categories'), api('/category-groups').catch(()=>[])])
+        .then(([cs,gs])=>{ setGroups(gs||[]); setCategories(resolveAreas(cs||[], gs||[])); }).catch(()=>{});
       React.useEffect(()=>{ loadCategories(); },[]);
 
       // Follow starts/stops made in other tabs.
@@ -1436,7 +1565,7 @@
         } finally { setBusy(false); }
       }
 
-      const areaColor  = running && (categories.find(c=>c.id===running.category_id)||{}).color;
+      const runArea    = running && categories.find(c=>c.id===running.category_id);
       const elapsedSec = running ? Math.max(0, Math.round((now - new Date(running.start_time))/1000)) : 0;
 
       return (
@@ -1448,7 +1577,7 @@
           )}
           {running && (
             <div style={{display:'flex',alignItems:'center',gap:6,background:'var(--bg-subtle)',border:'1px solid var(--border)',borderRadius:8,padding:'4px 6px 4px 10px'}}>
-              <span style={{width:8,height:8,borderRadius:'50%',background:areaColor||'#ef4444',flexShrink:0}}/>
+              <span style={{width:8,height:8,borderRadius:'50%',background:runArea?areaColor(runArea):'#ef4444',flexShrink:0}}/>
               <span style={{fontFamily:'var(--font-mono)',fontSize:13,fontWeight:600,minWidth:50}} title={running.title||undefined}>{fmtClock(elapsedSec)}</span>
               <button onClick={stop} disabled={busy} style={{...S.btnPri,padding:'4px 10px',fontSize:12}}>{busy?'Stopping…':'Stop'}</button>
               <button onClick={discard} disabled={busy} title="Discard without logging" style={{...S.iconBtn,color:'#dc2626',padding:'2px 6px'}}>×</button>
@@ -1461,7 +1590,7 @@
                   <label style={S.label}>Area</label>
                   <select style={S.input} value={form.category_id} onChange={e=>setForm(f=>({...f,category_id:e.target.value}))} autoFocus>
                     <option value="">No area</option>
-                    {categories.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                    {areaOptions(categories,groups)}
                   </select>
                 </div>
                 <div style={{marginBottom:12}}>
@@ -1482,10 +1611,24 @@
     // ─────────────────────────────────────────────
     // LOG VIEW — record sessions, see weekly stats
     // ─────────────────────────────────────────────
+    // Rolls stats areas up by category group (largest first), ungrouped Areas
+    // and "Uncategorized" last under a null group.
+    function statsSections(areas) {
+      const m=new Map();
+      areas.forEach(a=>{
+        const k=a.group_id||'';
+        if(!m.has(k)) m.set(k,{ id:a.group_id||null, name:a.group_name||'', color:a.group_color||'', areas:[], total:0, target:0 });
+        const sec=m.get(k); sec.areas.push(a); sec.total+=a.total_minutes; sec.target+=a.weekly_target_minutes||0;
+      });
+      return [...m.values()].sort((x,y)=>(!x.id)-(!y.id)||y.total-x.total);
+    }
+
     function StatsPanel({ stats, label='This week', showTargets=true }) {
       if(!stats) return null;
       const areas=(stats.areas||[]).slice().sort((a,b)=>b.total_minutes-a.total_minutes);
       const grand=areas.reduce((s,a)=>s+a.total_minutes,0);
+      const sections=statsSections(areas);
+      const grouped=sections.some(sec=>sec.id);
       return (
         <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:14}}>
@@ -1493,20 +1636,32 @@
             <div style={{fontSize:13,color:'var(--text-muted)'}}>{fmtMins(grand)} total</div>
           </div>
           {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14}}>Nothing logged in this period yet.</div>}
-          {areas.map(a=>{
+          {sections.map(sec=>(
+            <div key={sec.id||'none'} style={grouped?{marginBottom:6}:null}>
+              {grouped&&(
+                <div style={{display:'flex',alignItems:'baseline',gap:8,padding:'6px 0 8px',borderTop:'1px solid var(--border)'}}>
+                  <span style={{fontSize:12,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.04em',color:'var(--text-muted)',flex:1}}>{sec.id?sec.name:'Ungrouped'}</span>
+                  <span style={{fontSize:12,color:'var(--text-muted)',fontFamily:'var(--font-mono)'}}>
+                    {fmtMins(sec.total)}{showTargets&&sec.target>0?` / ${fmtMins(sec.target)}`:''}
+                  </span>
+                </div>
+              )}
+          {sec.areas.map(a=>{
             const tgt=showTargets?(a.weekly_target_minutes||0):0;
             const pct=tgt>0?Math.min(100,Math.round(a.total_minutes/tgt*100)):(grand>0?Math.round(a.total_minutes/grand*100):0);
             return (
               <div key={a.area_id||'none'} style={{marginBottom:12}}>
                 <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
-                  <span style={{width:10,height:10,borderRadius:'50%',background:a.area_color||'#cbd5e1',flexShrink:0}}/>
+                  {a.area_code
+                    ? <AreaBadge area={{code:a.area_code,color:a.group_color||a.area_color}}/>
+                    : <span style={{width:10,height:10,borderRadius:'50%',background:a.area_color||'#cbd5e1',flexShrink:0}}/>}
                   <span style={{fontSize:13,fontWeight:500,flex:1}}>{a.area_name}</span>
                   <span style={{fontSize:12,color:'var(--text-muted)',fontFamily:'var(--font-mono)'}}>
                     {fmtMins(a.total_minutes)}{tgt>0?` / ${fmtMins(tgt)}`:''}
                   </span>
                 </div>
                 <div style={{height:6,borderRadius:3,background:'var(--bg-subtle)',overflow:'hidden'}}>
-                  <div style={{height:'100%',width:`${pct}%`,background:a.area_color||'var(--accent)',borderRadius:3,transition:'0.2s'}}/>
+                  <div style={{height:'100%',width:`${pct}%`,background:a.group_color||a.area_color||'var(--accent)',borderRadius:3,transition:'0.2s'}}/>
                 </div>
                 {a.sub_activities&&a.sub_activities.length>0&&(
                   <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:5}}>
@@ -1518,6 +1673,8 @@
               </div>
             );
           })}
+            </div>
+          ))}
         </div>
       );
     }
@@ -1533,7 +1690,7 @@
         id: e.id,
         area_id: e.category_id || '',
         area_name: c ? c.name : '',
-        area_color: c ? c.color : '',
+        area_color: c ? areaColor(c) : '',
         sub_activity: e.title || '',
         duration_minutes: mins,
         notes: e.description || '',
@@ -1544,6 +1701,7 @@
     function LogView({ user, onLogout, nav }) {
       const blankForm=()=>({ area_id:'', sub_activity:'', hours:'0', minutes:'30', date:ymd(new Date()), notes:'' });
       const [areas,setAreas]=React.useState([]);
+      const [groups,setGroups]=React.useState([]);
       const [logs,setLogs]=React.useState([]);
       const [stats,setStats]=React.useState(null);
       const [editing,setEditing]=React.useState(null);
@@ -1575,8 +1733,9 @@
           // count elapsed time only, not future plans. '30 days' ends now, not when it was
           // picked — otherwise sessions logged since (e.g. via the timer) never show up.
           const to=(range==='30d'||period.to>now)?now:period.to;
-          const cats=await api('/categories'); setAreas(cats||[]);
-          const catById={}; (cats||[]).forEach(c=>{ catById[c.id]=c; });
+          const gs=await api('/category-groups')||[]; setGroups(gs);
+          const cats=resolveAreas(await api('/categories')||[], gs); setAreas(cats);
+          const catById={}; cats.forEach(c=>{ catById[c.id]=c; });
           // Logged sessions = non all-day events within the selected window, up to now.
           const evs=await api(`/events?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`)||[];
           setLogs(evs.filter(e=>!e.all_day).map(e=>eventToLog(e,catById)));
@@ -1674,7 +1833,7 @@
                     </div>
                     <select style={S.input} value={form.area_id} onChange={set('area_id')}>
                       <option value="">No area</option>
-                      {areas.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}
+                      {areaOptions(areas,groups)}
                     </select></div>
                   <div><label style={S.label}>Activity</label><input style={S.input} value={form.sub_activity} onChange={set('sub_activity')} placeholder="reading…"/></div>
                   <div><label style={S.label}>Hours</label><input style={S.input} type="number" min="0" value={form.hours} onChange={set('hours')}/></div>
@@ -1742,8 +1901,8 @@
               </div>
             </div>
           </div>
-          {newArea&&<AreaModal onClose={()=>setNewArea(false)}
-            onSaved={cat=>{ setAreas(as=>[...as,cat]); setForm(f=>({...f,area_id:cat.id})); setNewArea(false); }}/>}
+          {newArea&&<AreaModal groups={groups} onClose={()=>setNewArea(false)}
+            onSaved={cat=>{ setAreas(as=>resolveAreas([...as,cat],groups)); setForm(f=>({...f,area_id:cat.id})); setNewArea(false); }}/>}
         </div>
       );
     }
@@ -1778,7 +1937,9 @@
       return (
         <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:16,display:'flex',flexDirection:'column'}}>
           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
-            <span style={{width:12,height:12,borderRadius:3,background:area.color||'#cbd5e1',flexShrink:0}}/>
+            {area.code
+              ? <AreaBadge area={area} size={11}/>
+              : <span style={{width:12,height:12,borderRadius:3,background:areaColor(area),flexShrink:0}}/>}
             <div style={{fontSize:15,fontWeight:600,flex:1}}>{area.name}</div>
             {onEdit&&<button style={S.iconBtn} title="Edit area" onClick={onEdit}>✎</button>}
           </div>
@@ -1789,13 +1950,13 @@
               </div>
               {tgt>0&&(
                 <div style={{display:'flex',height:6,borderRadius:3,background:'var(--bg-subtle)',overflow:'hidden'}}>
-                  <div style={{width:`${donePct}%`,background:area.color||'var(--accent)',transition:'0.2s'}} title={`Logged ${fmtMins(weekMins)}`}/>
-                  {planPct>0&&<div style={{width:`${planPct}%`,background:area.color||'var(--accent)',opacity:0.4,transition:'0.2s'}} title={`Planned ${fmtMins(plannedMins)}`}/>}
+                  <div style={{width:`${donePct}%`,background:areaColor(area),transition:'0.2s'}} title={`Logged ${fmtMins(weekMins)}`}/>
+                  {planPct>0&&<div style={{width:`${planPct}%`,background:areaColor(area),opacity:0.4,transition:'0.2s'}} title={`Planned ${fmtMins(plannedMins)}`}/>}
                 </div>
               )}
               {plannedMins>0&&(
                 <div style={{fontSize:11,color:'var(--text-muted)',marginTop:5,display:'flex',alignItems:'center',gap:5}}>
-                  <span style={{width:8,height:8,borderRadius:2,background:area.color||'var(--accent)',opacity:0.4,flexShrink:0}}/>
+                  <span style={{width:8,height:8,borderRadius:2,background:areaColor(area),opacity:0.4,flexShrink:0}}/>
                   <span>{fmtMins(plannedMins)} planned{tgt>0?(projected<tgt?` · ${fmtMins(tgt-projected)} to target`:' · on track'):''}</span>
                 </div>
               )}
@@ -1823,10 +1984,13 @@
       );
     }
 
-    function AreaModal({ area, onClose, onSaved, onDeleted }) {
+    function AreaModal({ area, groups=[], defaultGroupId=null, onClose, onSaved, onDeleted }) {
       const isEdit=!!area;
       const [name,setName]=React.useState(area?.name||'');
       const [color,setColor]=React.useState(area?.color||CALENDAR_COLORS[0]);
+      const [groupId,setGroupId]=React.useState(area?(area.group_id||''):(defaultGroupId||''));
+      const [code,setCode]=React.useState(area?.code||'');
+      const group=groups.find(g=>g.id===groupId);
       const [hours,setHours]=React.useState(area?String(Math.round((area.weekly_target_minutes||0)/60*10)/10):'0');
       const [busy,setBusy]=React.useState(false);
       const [err,setErr]=React.useState('');
@@ -1836,7 +2000,10 @@
         setBusy(true); setErr('');
         try {
           const weekly=Math.round(parseFloat(hours||'0')*60);
-          const body={ name:name.trim(), color, weekly_target_minutes:weekly };
+          // Explicit null ungroups on edit. An empty code has the server derive one
+          // from the name, on edit too.
+          const body={ name:name.trim(), color, weekly_target_minutes:weekly, group_id:groupId||null };
+          body.code=code.trim();
           const saved = isEdit
             ? await api(`/categories/${area.id}`,{method:'PUT',body:JSON.stringify(body)})
             : await api('/categories',{method:'POST',body:JSON.stringify(body)});
@@ -1859,14 +2026,30 @@
               <button onClick={onClose} style={{...S.iconBtn,fontSize:22}}>×</button>
             </div>
             <form onSubmit={save}>
-              <div style={{marginBottom:16}}><label style={S.label}>Name</label><input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. French, Fitness" autoFocus required/></div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 88px',gap:10,marginBottom:16}}>
+                <div><label style={S.label}>Name</label><input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. French, Fitness" autoFocus required/></div>
+                <div><label style={S.label}>Code</label><input style={{...S.input,fontFamily:'var(--font-mono)',textTransform:'uppercase'}} value={code} maxLength={4} onChange={e=>setCode(e.target.value)} placeholder="auto" title="1–4 letters or digits, shown as a badge on events. Leave empty to derive one from the name."/></div>
+              </div>
+              {(groups.length>0||groupId)&&(
+                <div style={{marginBottom:16}}>
+                  <label style={S.label}>Group</label>
+                  <select style={S.input} value={groupId} onChange={e=>setGroupId(e.target.value)}>
+                    <option value="">No group</option>
+                    {groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                </div>
+              )}
               <div style={{marginBottom:16}}>
                 <label style={S.label}>Color</label>
-                <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
-                  {CALENDAR_COLORS.map(c=>(
-                    <button key={c} type="button" onClick={()=>setColor(c)} style={{width:28,height:28,borderRadius:'50%',background:c,border:color===c?'3px solid #111':'3px solid transparent',cursor:'pointer',outline:'none'}}/>
-                  ))}
-                </div>
+                {group
+                  ? <div style={{display:'flex',alignItems:'center',gap:8,fontSize:13,color:'var(--text-muted)',marginTop:4}}>
+                      <span style={{width:16,height:16,borderRadius:'50%',background:group.color,flexShrink:0}}/>Uses the {group.name} group color
+                    </div>
+                  : <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
+                      {CALENDAR_COLORS.map(c=>(
+                        <button key={c} type="button" onClick={()=>setColor(c)} style={{width:28,height:28,borderRadius:'50%',background:c,border:color===c?'3px solid #111':'3px solid transparent',cursor:'pointer',outline:'none'}}/>
+                      ))}
+                    </div>}
               </div>
               <div style={{marginBottom:20}}><label style={S.label}>Weekly target (hours)</label><input style={S.input} type="number" min="0" step="0.5" value={hours} onChange={e=>setHours(e.target.value)} placeholder="0 = no target"/></div>
               {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
@@ -1881,12 +2064,73 @@
       );
     }
 
+    // `groups` (the existing ones) lets a new group default to an unused colour
+    // and sort after the others.
+    function GroupModal({ group, groups=[], onClose, onSaved, onDeleted }) {
+      const isEdit=!!group;
+      const [name,setName]=React.useState(group?.name||'');
+      const [color,setColor]=React.useState(()=>group?.color||CALENDAR_COLORS.find(c=>!groups.some(g=>g.color===c))||CALENDAR_COLORS[0]);
+      const [busy,setBusy]=React.useState(false);
+      const [err,setErr]=React.useState('');
+
+      async function save(e) {
+        e.preventDefault(); if(!name.trim())return;
+        setBusy(true); setErr('');
+        try {
+          const body={ name:name.trim(), color };
+          if(!isEdit) body.position=groups.reduce((m,g)=>Math.max(m,g.position+1),0);
+          const saved = isEdit
+            ? await api(`/category-groups/${group.id}`,{method:'PUT',body:JSON.stringify(body)})
+            : await api('/category-groups',{method:'POST',body:JSON.stringify(body)});
+          onSaved(saved);
+        } catch(ex){ setErr(ex.message); setBusy(false); }
+      }
+
+      async function del() {
+        if(!confirm('Delete this group? Its areas are kept and become ungrouped.')) return;
+        setBusy(true); setErr('');
+        try{ await api(`/category-groups/${group.id}`,{method:'DELETE'}); onDeleted&&onDeleted(group.id); }
+        catch(ex){ setErr(ex.message); setBusy(false); }
+      }
+
+      return (
+        <div style={S.overlay} onClick={onClose}>
+          <div style={{...S.modal,width:360}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+              <h2 style={{margin:0,fontSize:18,fontWeight:700}}>{isEdit?'Edit Group':'New Group'}</h2>
+              <button onClick={onClose} style={{...S.iconBtn,fontSize:22}}>×</button>
+            </div>
+            <form onSubmit={save}>
+              <div style={{marginBottom:16}}><label style={S.label}>Name</label><input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Language learning, Health" autoFocus required/></div>
+              <div style={{marginBottom:20}}>
+                <label style={S.label}>Color</label>
+                <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
+                  {CALENDAR_COLORS.map(c=>(
+                    <button key={c} type="button" onClick={()=>setColor(c)} style={{width:28,height:28,borderRadius:'50%',background:c,border:color===c?'3px solid #111':'3px solid transparent',cursor:'pointer',outline:'none'}}/>
+                  ))}
+                </div>
+                <div style={{fontSize:12,color:'var(--text-muted)',marginTop:6}}>Every area in the group uses this color.</div>
+              </div>
+              {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap'}}>
+                {isEdit&&onDeleted&&<button type="button" onClick={del} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5'}}>Delete</button>}
+                <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
+                <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':(isEdit?'Save':'Create')}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
     function AreasView({ user, onLogout, nav }) {
       const [areas,setAreas]=React.useState([]);
+      const [groups,setGroups]=React.useState([]);
       const [tasks,setTasks]=React.useState([]);
       const [weekMins,setWeekMins]=React.useState({});
       const [plannedMins,setPlannedMins]=React.useState({});
-      const [editing,setEditing]=React.useState(null); // 'new' | area | null
+      const [editing,setEditing]=React.useState(null); // {groupId} for new | area | null
+      const [editingGroup,setEditingGroup]=React.useState(null); // 'new' | group | null
       const [err,setErr]=React.useState('');
 
       async function loadAll() {
@@ -1895,7 +2139,8 @@
           const now=new Date();
           const statsTo = to>now?now:to;      // elapsed portion of the week
           const planFrom = now>from?now:from;  // remaining portion of the week
-          const cats=await api('/categories'); setAreas(cats||[]);
+          const gs=await api('/category-groups')||[]; setGroups(gs);
+          setAreas(resolveAreas(await api('/categories')||[], gs));
           const t=await api('/tasks'); setTasks(t||[]);
           const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(statsTo.toISOString())}`);
           const m={}; (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; }); setWeekMins(m);
@@ -1918,30 +2163,58 @@
         tasks.forEach(t=>{ const k=t.area_id||'none'; (m[k]=m[k]||[]).push(t); });
         return m;
       },[tasks]);
+      const noAreaCard=()=>(
+        <AreaCard key="none" area={{id:null,name:'No area',color:'#cbd5e1',weekly_target_minutes:0}} tasks={tasksByArea['none']} weekMins={0} plannedMins={0}
+          onToggle={toggleTask} onAdd={addTask} onDel={delTask}/>
+      );
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
           <TopBar title="Areas" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}>
             <TimerChip user={user} onLogged={loadAll}/>
-            <button style={S.btnPri} onClick={()=>setEditing('new')}><span style={{fontSize:18,lineHeight:1,marginTop:-1}}>+</span> New area</button>
+            <button style={S.btnOut} onClick={()=>setEditingGroup('new')}>+ New group</button>
+            <button style={S.btnPri} onClick={()=>setEditing({groupId:null})}><span style={{fontSize:18,lineHeight:1,marginTop:-1}}>+</span> New area</button>
           </TopBar>
           <div style={{flex:1,overflow:'auto',background:'var(--bg-subtle)'}}>
             <div style={{maxWidth:1100,margin:'0 auto',padding:'24px 20px 60px'}}>
               {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
-              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:18,alignItems:'start'}}>
-                {areas.map(a=>(
-                  <AreaCard key={a.id} area={a} tasks={tasksByArea[a.id]||[]} weekMins={weekMins[a.id]||0} plannedMins={plannedMins[a.id]||0}
-                    onToggle={toggleTask} onAdd={addTask} onDel={delTask} onEdit={()=>setEditing(a)}/>
-                ))}
-                {(tasksByArea['none']||[]).length>0&&(
-                  <AreaCard area={{id:null,name:'No area',color:'#cbd5e1',weekly_target_minutes:0}} tasks={tasksByArea['none']} weekMins={0} plannedMins={0}
-                    onToggle={toggleTask} onAdd={addTask} onDel={delTask}/>
-                )}
-              </div>
+              {groupAreas(areas,groups).map(({group,areas:sectionAreas})=>{
+                const target=sectionAreas.reduce((n,a)=>n+(a.weekly_target_minutes||0),0);
+                const logged=sectionAreas.reduce((n,a)=>n+(weekMins[a.id]||0),0);
+                const showNone=!group&&(tasksByArea['none']||[]).length>0;
+                return (
+                  <section key={group?.id||'none'} style={{marginBottom:28}}>
+                    {(groups.length>0)&&(
+                      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
+                        {group&&<span style={{width:12,height:12,borderRadius:3,background:group.color,flexShrink:0}}/>}
+                        <h2 style={{margin:0,fontSize:15,fontWeight:700}}>{group?group.name:'Ungrouped'}</h2>
+                        {target>0&&<span style={{fontSize:12,color:'var(--text-muted)',fontFamily:'var(--font-mono)'}}>{fmtMins(logged)} / {fmtMins(target)} this week</span>}
+                        <span style={{flex:1}}/>
+                        {group&&<button style={{...S.iconBtn,fontSize:13}} title={`Add area to ${group.name}`} onClick={()=>setEditing({groupId:group.id})}>+ Area</button>}
+                        {group&&<button style={S.iconBtn} title={`Edit group ${group.name}`} aria-label={`Edit group ${group.name}`} onClick={()=>setEditingGroup(group)}>✎</button>}
+                      </div>
+                    )}
+                    {group&&sectionAreas.length===0&&<div style={{color:'var(--text-muted)',fontSize:13}}>No areas in this group yet.</div>}
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:18,alignItems:'start'}}>
+                      {sectionAreas.map(a=>(
+                        <AreaCard key={a.id} area={a} tasks={tasksByArea[a.id]||[]} weekMins={weekMins[a.id]||0} plannedMins={plannedMins[a.id]||0}
+                          onToggle={toggleTask} onAdd={addTask} onDel={delTask} onEdit={()=>setEditing(a)}/>
+                      ))}
+                      {showNone&&noAreaCard()}
+                    </div>
+                  </section>
+                );
+              })}
+              {!groupAreas(areas,groups).some(sec=>!sec.group)&&(tasksByArea['none']||[]).length>0&&(
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:18,alignItems:'start'}}>{noAreaCard()}</div>
+              )}
               {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14,marginTop:20}}>No areas yet. Create one to start tracking goals and tasks.</div>}
             </div>
           </div>
-          {editing&&<AreaModal area={editing==='new'?null:editing} onClose={()=>setEditing(null)}
+          {editingGroup&&<GroupModal group={editingGroup==='new'?null:editingGroup} groups={groups} onClose={()=>setEditingGroup(null)}
+            onSaved={async()=>{ setEditingGroup(null); await loadAll(); }}
+            onDeleted={async()=>{ setEditingGroup(null); await loadAll(); }}/>}
+          {editing&&<AreaModal area={editing.id?editing:null} defaultGroupId={editing.groupId} groups={groups} onClose={()=>setEditing(null)}
             onSaved={async()=>{ setEditing(null); await loadAll(); }}
             onDeleted={async()=>{ setEditing(null); await loadAll(); }}/>}
         </div>

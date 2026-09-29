@@ -276,6 +276,48 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 				RAISE WARNING 'users with emails differing only in case exist; users_email_lower_uniq not created';
 			END IF;
 		END $$;
+
+		-- category_groups: an optional parent level that groups Areas (e.g.
+		-- "Language learning" holding French and Japanese). The group carries the
+		-- shared colour; deleting a group leaves its Areas ungrouped.
+		CREATE TABLE IF NOT EXISTS category_groups (
+			id         UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+			owner_id   UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name       TEXT        NOT NULL,
+			color      TEXT        NOT NULL DEFAULT '#4285F4',
+			position   INT         NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE (owner_id, name)
+		);
+
+		ALTER TABLE categories
+			ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES category_groups(id) ON DELETE SET NULL,
+			ADD COLUMN IF NOT EXISTS position INT NOT NULL DEFAULT 0,
+			ADD COLUMN IF NOT EXISTS code     TEXT;
+
+		CREATE INDEX IF NOT EXISTS categories_group_idx ON categories (group_id);
+
+		-- code: a short per-owner badge for an Area ("FR"). Backfill rows that
+		-- predate the column with the name's first two letters, suffixing a
+		-- number on collisions ("CA", "CA2"). Letters-only bases plus a digit
+		-- suffix can't collide with one another. Only NULL rows are touched, so
+		-- after the first run this is a no-op.
+		WITH base AS (
+			SELECT id, owner_id,
+			       COALESCE(NULLIF(upper(left(regexp_replace(name, '[^[:alpha:]]', '', 'g'), 2)), ''), 'X') AS b,
+			       created_at
+			FROM categories WHERE code IS NULL
+		), numbered AS (
+			SELECT id, b, row_number() OVER (PARTITION BY owner_id, b ORDER BY created_at, id) AS n
+			FROM base
+		)
+		UPDATE categories c
+		SET code = CASE WHEN numbered.n = 1 THEN numbered.b ELSE numbered.b || numbered.n END
+		FROM numbered WHERE c.id = numbered.id;
+
+		ALTER TABLE categories ALTER COLUMN code SET NOT NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS categories_owner_code_uniq ON categories (owner_id, code);
 	`)
 	if err != nil {
 		return err

@@ -9,61 +9,56 @@ import (
 	"github.com/hylin/calendar/internal/model"
 	"github.com/hylin/calendar/internal/repository"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-type CategoryHandler struct {
-	repo      *repository.CategoryRepository
-	groupRepo *repository.CategoryGroupRepository
+type CategoryGroupHandler struct {
+	repo *repository.CategoryGroupRepository
 }
 
-func NewCategoryHandler(repo *repository.CategoryRepository, groupRepo *repository.CategoryGroupRepository) *CategoryHandler {
-	return &CategoryHandler{repo: repo, groupRepo: groupRepo}
+func NewCategoryGroupHandler(repo *repository.CategoryGroupRepository) *CategoryGroupHandler {
+	return &CategoryGroupHandler{repo: repo}
 }
 
-func (h *CategoryHandler) Create(c *gin.Context) {
+func (h *CategoryGroupHandler) Create(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
-	var req model.CreateCategoryRequest
+	var req model.CreateCategoryGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !rejectBlank(c, &req.Name, &req.Color) || !normalizeCodeField(c, &req.Code) {
+	if !rejectBlank(c, &req.Name, &req.Color) {
 		return
 	}
-	if !validateGroupOwnership(c, h.groupRepo, ownerID, req.GroupID) {
-		return
-	}
-	cat, err := h.repo.Create(c.Request.Context(), ownerID, req)
+	g, err := h.repo.Create(c.Request.Context(), ownerID, req)
 	if err != nil {
 		if isUniqueViolation(err) {
-			c.JSON(http.StatusConflict, gin.H{"error": categoryConflictMessage(err)})
+			c.JSON(http.StatusConflict, gin.H{"error": "group name already exists"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, cat)
+	c.JSON(http.StatusCreated, g)
 }
 
-func (h *CategoryHandler) List(c *gin.Context) {
+func (h *CategoryGroupHandler) List(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
-	cats, err := h.repo.List(c.Request.Context(), ownerID)
+	groups, err := h.repo.List(c.Request.Context(), ownerID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, cats)
+	c.JSON(http.StatusOK, groups)
 }
 
-func (h *CategoryHandler) GetByID(c *gin.Context) {
+func (h *CategoryGroupHandler) GetByID(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	cat, err := h.repo.GetByID(c.Request.Context(), id, ownerID)
+	g, err := h.repo.GetByID(c.Request.Context(), id, ownerID)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
@@ -72,44 +67,41 @@ func (h *CategoryHandler) GetByID(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, cat)
+	c.JSON(http.StatusOK, g)
 }
 
-func (h *CategoryHandler) Update(c *gin.Context) {
+func (h *CategoryGroupHandler) Update(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	var req model.UpdateCategoryRequest
+	var req model.UpdateCategoryGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !rejectBlank(c, req.Name, req.Color) || !normalizeCodeField(c, req.Code) {
+	if !rejectBlank(c, req.Name, req.Color) {
 		return
 	}
-	if req.GroupID.Set && !validateGroupOwnership(c, h.groupRepo, ownerID, req.GroupID.Value) {
-		return
-	}
-	cat, err := h.repo.Update(c.Request.Context(), id, ownerID, req)
+	g, err := h.repo.Update(c.Request.Context(), id, ownerID, req)
 	if err == pgx.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 	if err != nil {
 		if isUniqueViolation(err) {
-			c.JSON(http.StatusConflict, gin.H{"error": categoryConflictMessage(err)})
+			c.JSON(http.StatusConflict, gin.H{"error": "group name already exists"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, cat)
+	c.JSON(http.StatusOK, g)
 }
 
-func (h *CategoryHandler) Delete(c *gin.Context) {
+func (h *CategoryGroupHandler) Delete(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -121,11 +113,4 @@ func (h *CategoryHandler) Delete(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
-}
-
-func isUniqueViolation(err error) bool {
-	if pgErr, ok := err.(*pgconn.PgError); ok {
-		return pgErr.Code == "23505"
-	}
-	return false
 }

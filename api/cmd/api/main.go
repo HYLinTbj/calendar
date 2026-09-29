@@ -45,6 +45,7 @@ func main() {
 	recurringRepo := repository.NewRecurringEventRepository(pool)
 	inviteRepo := repository.NewInvitationRepository(pool)
 	categoryRepo := repository.NewCategoryRepository(pool)
+	categoryGroupRepo := repository.NewCategoryGroupRepository(pool)
 	shareRepo := repository.NewCalendarShareRepository(pool)
 	taskRepo := repository.NewTaskRepository(pool)
 	reminderQueue := queue.NewReminderQueue(rdb)
@@ -62,7 +63,8 @@ func main() {
 	eventHandler := handler.NewEventHandler(eventRepo, calRepo, shareRepo, inviteRepo, recurringRepo, categoryRepo, reminderQueue)
 	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo, categoryRepo)
 	inviteHandler := handler.NewInvitationHandler(inviteRepo)
-	categoryHandler := handler.NewCategoryHandler(categoryRepo)
+	categoryHandler := handler.NewCategoryHandler(categoryRepo, categoryGroupRepo)
+	categoryGroupHandler := handler.NewCategoryGroupHandler(categoryGroupRepo)
 	taskHandler := handler.NewTaskHandler(taskRepo, categoryRepo)
 	icsHandler := handler.NewICSHandler(calRepo, eventRepo, recurringRepo, inviteRepo)
 	freeBusyHandler := handler.NewFreeBusyHandler(eventRepo, userRepo)
@@ -126,6 +128,15 @@ func main() {
 			cats.GET("/:id", categoryHandler.GetByID)
 			cats.PUT("/:id", categoryHandler.Update)
 			cats.DELETE("/:id", categoryHandler.Delete)
+		}
+
+		groups := protected.Group("/category-groups")
+		{
+			groups.POST("", categoryGroupHandler.Create)
+			groups.GET("", categoryGroupHandler.List)
+			groups.GET("/:id", categoryGroupHandler.GetByID)
+			groups.PUT("/:id", categoryGroupHandler.Update)
+			groups.DELETE("/:id", categoryGroupHandler.Delete)
 		}
 
 		recurring := protected.Group("/recurring-events")

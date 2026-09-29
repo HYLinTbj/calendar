@@ -24,7 +24,7 @@ func truncateAll(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `
 		TRUNCATE tasks, event_invitations, calendar_shares, events,
-		         recurring_events, categories, calendars, users, maintenance_runs RESTART IDENTITY
+		         recurring_events, categories, category_groups, calendars, users, maintenance_runs RESTART IDENTITY
 	`)
 	require.NoError(t, err)
 	require.NoError(t, testRDB.FlushDB(context.Background()).Err())
@@ -108,6 +108,21 @@ func createCategory(t *testing.T, token, name string, weeklyTarget int) uuid.UUI
 		"weekly_target_minutes": weeklyTarget,
 	})
 	require.Equal(t, http.StatusCreated, w.Code, "create category failed: %s", w.Body.String())
+	var resp struct {
+		ID uuid.UUID `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	return resp.ID
+}
+
+// createCategoryGroup creates a category group via the API and returns its ID.
+func createCategoryGroup(t *testing.T, token, name, color string) uuid.UUID {
+	t.Helper()
+	w := Do(t, testRouter, "POST", "/category-groups", token, map[string]any{
+		"name":  name,
+		"color": color,
+	})
+	require.Equal(t, http.StatusCreated, w.Code, "create category group failed: %s", w.Body.String())
 	var resp struct {
 		ID uuid.UUID `json:"id"`
 	}

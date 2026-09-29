@@ -85,6 +85,7 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 	recurringRepo := repository.NewRecurringEventRepository(pool)
 	inviteRepo := repository.NewInvitationRepository(pool)
 	categoryRepo := repository.NewCategoryRepository(pool)
+	categoryGroupRepo := repository.NewCategoryGroupRepository(pool)
 	shareRepo := repository.NewCalendarShareRepository(pool)
 	reminderQueue := queue.NewReminderQueue(rdb)
 
@@ -95,7 +96,8 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 	eventHandler := handler.NewEventHandler(eventRepo, calRepo, shareRepo, inviteRepo, recurringRepo, categoryRepo, reminderQueue)
 	recurringHandler := handler.NewRecurringEventHandler(recurringRepo, calRepo, categoryRepo)
 	inviteHandler := handler.NewInvitationHandler(inviteRepo)
-	categoryHandler := handler.NewCategoryHandler(categoryRepo)
+	categoryHandler := handler.NewCategoryHandler(categoryRepo, categoryGroupRepo)
+	categoryGroupHandler := handler.NewCategoryGroupHandler(categoryGroupRepo)
 	taskHandler := handler.NewTaskHandler(repository.NewTaskRepository(pool), categoryRepo)
 	icsHandler := handler.NewICSHandler(calRepo, eventRepo, recurringRepo, inviteRepo)
 	freeBusyHandler := handler.NewFreeBusyHandler(eventRepo, userRepo)
@@ -155,6 +157,15 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 			cats.GET("/:id", categoryHandler.GetByID)
 			cats.PUT("/:id", categoryHandler.Update)
 			cats.DELETE("/:id", categoryHandler.Delete)
+		}
+
+		groups := protected.Group("/category-groups")
+		{
+			groups.POST("", categoryGroupHandler.Create)
+			groups.GET("", categoryGroupHandler.List)
+			groups.GET("/:id", categoryGroupHandler.GetByID)
+			groups.PUT("/:id", categoryGroupHandler.Update)
+			groups.DELETE("/:id", categoryGroupHandler.Delete)
 		}
 
 		recurring := protected.Group("/recurring-events")
