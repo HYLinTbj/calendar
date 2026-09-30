@@ -84,6 +84,16 @@
     }
     function weekRange(d) { const s=startOfWeek(d); return { from:s, to:addDays(s,7) }; }
 
+    // Traces: short stretches of time with no clock time (minutes on an Area on a
+    // day). A timer stopped before this many minutes logs a trace instead of an event.
+    const TRACE_CUTOFF_MIN = 15;
+    // Stats count a trace in the window holding the start of its day, in this zone.
+    const userTz = (()=>{ try { return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'; } catch { return 'UTC'; } })();
+    function statsUrl(from, to) {
+      return `/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(userTz)}`;
+    }
+    function tracesUrl(fromDay, toDay) { return `/traces?from=${fromDay}&to=${toDay}`; }
+
     // All-day events use UTC date directly; timed events use local date
     function evtKey(e) {
       return e.all_day ? new Date(e.start_time).toISOString().slice(0,10) : ymd(new Date(e.start_time));
@@ -570,7 +580,73 @@
     // ─────────────────────────────────────────────
     // TIME GRID (week + day)
     // ─────────────────────────────────────────────
-    function TimeGrid({ days, events, calendars, categories, onSlotClick, onEventClick, onEventDrop }) {
+    // One day's traces rolled up per Area, largest first, for the strip and its popover.
+    function traceTotals(traces, categories=[]) {
+      const m=new Map();
+      traces.forEach(t=>{
+        const a=categories.find(c=>c.id===t.category_id)||null;
+        const k=a?a.id:'none';
+        if(!m.has(k)) m.set(k,{ key:k, area:a, name:a?a.name:'No area', color:areaColor(a), minutes:0 });
+        m.get(k).minutes+=t.minutes;
+      });
+      return [...m.values()].sort((x,y)=>y.minutes-x.minutes);
+    }
+
+    // The row under the week/day headers summarizing each day's traces. Traces have
+    // no clock time, so they never get a place on the hour grid.
+    function TraceStrip({ days, traces, categories, onOpenLog }) {
+      const [open,setOpen]=React.useState(null); // ymd of the day whose summary is open
+      const byDay=React.useMemo(()=>{
+        const m={}; days.forEach(d=>{ m[ymd(d)]=[]; });
+        traces.forEach(t=>{ if(m[t.day]) m[t.day].push(t); });
+        return m;
+      },[days,traces]);
+      return (
+        <div style={{display:'flex',borderBottom:'1px solid var(--border)',flexShrink:0,background:'var(--bg-subtle)'}}>
+          <div style={{width:52,flexShrink:0,boxSizing:'border-box',padding:'7px 8px 0 0',textAlign:'right',fontSize:10,color:'var(--text-muted)'}}>traces</div>
+          {days.map((day,i)=>{
+            const k=ymd(day), items=byDay[k]||[];
+            const totals=traceTotals(items,categories);
+            const sum=totals.reduce((n,a)=>n+a.minutes,0);
+            return (
+              <div key={k} style={{flex:1,minWidth:0,borderLeft:'1px solid var(--border)',position:'relative'}}>
+                {items.length>0 ? (
+                  <button type="button" onClick={()=>setOpen(o=>o===k?null:k)} title="Traces on this day"
+                    style={{display:'flex',flexDirection:'column',gap:4,width:'100%',padding:'6px 8px',border:'none',background:'transparent',cursor:'pointer',textAlign:'left'}}>
+                    <span style={{display:'flex',width:'100%',height:5,borderRadius:3,overflow:'hidden',gap:1}}>
+                      {totals.map(a=><span key={a.key} style={{flex:a.minutes,background:a.color}}/>)}
+                    </span>
+                    <span style={{fontSize:11,fontFamily:'var(--font-mono)',color:'var(--text)',whiteSpace:'nowrap'}}>{fmtMins(sum)} · {items.length}</span>
+                  </button>
+                ) : <div style={{height:34}}/>}
+                {open===k&&(
+                  <>
+                    <div onClick={()=>setOpen(null)} style={{position:'fixed',inset:0,zIndex:40}}/>
+                    <div style={{position:'absolute',top:'100%',[i>=days.length-2&&days.length>2?'right':'left']:4,zIndex:41,width:230,background:'#fff',border:'1px solid var(--border)',borderRadius:10,boxShadow:'0 8px 24px rgba(0,0,0,0.12)',padding:12,fontSize:13}}>
+                      <div style={{display:'flex',justifyContent:'space-between',fontWeight:600,marginBottom:8}}>
+                        <span>{day.toLocaleDateString([],{weekday:'short',day:'numeric'})} · traces</span>
+                        <span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(sum)}</span>
+                      </div>
+                      {totals.map(a=>(
+                        <div key={a.key} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0'}}>
+                          {a.area?.code ? <AreaBadge area={a.area}/> : <span style={{width:8,height:8,borderRadius:'50%',background:a.color,flexShrink:0}}/>}
+                          <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.name}</span>
+                          <span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(a.minutes)}</span>
+                        </div>
+                      ))}
+                      {onOpenLog&&<button type="button" onClick={()=>{ setOpen(null); onOpenLog(k); }}
+                        style={{...S.iconBtn,fontSize:13,fontWeight:600,color:'var(--accent)',padding:'8px 0 0',marginTop:6,borderTop:'1px solid var(--border)',borderRadius:0,width:'100%'}}>Open in Log →</button>}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function TimeGrid({ days, events, traces=[], onOpenLog, calendars, categories, onSlotClick, onEventClick, onEventDrop }) {
       const ref=React.useRef(null);
       React.useEffect(()=>{ if(ref.current) ref.current.scrollTop=7*HOUR_H-30; },[]);
       const today=new Date();
@@ -725,6 +801,8 @@
               </div>
             ))}
           </div>
+
+          <TraceStrip days={days} traces={traces} categories={categories} onOpenLog={onOpenLog}/>
 
           {hasAllDay&&(
             <div style={{display:'flex',borderBottom:'1px solid var(--border)',flexShrink:0,maxHeight:92,overflowY:'auto'}}>
@@ -1284,6 +1362,7 @@
       const [rawCats,setCats]= React.useState([]);
       const [groups,setGroups]= React.useState([]);
       const [events,setEvts] = React.useState([]);
+      const [traces,setTraces] = React.useState([]);
       const [hiddenAreas,setHiddenAreas]=React.useState(()=>loadHiddenAreas(user?.id));
       const [selCals,setSel] = React.useState(new Set());
       const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
@@ -1324,6 +1403,13 @@
         // first visible day. Views place events by date, so out-of-range days aren't shown.
         Promise.all(ids.map(id=>api(`/events?calendar_id=${id}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&overlap=true`).then(d=>d||[]).catch(()=>[])))
           .then(r=>{ const seen=new Set(); setEvts(r.flat().filter(e=>{ if(seen.has(e.id)) return false; seen.add(e.id); return true; })); });
+        loadTraces();
+      }
+      // Traces show in the week and day views' strip under the day headers.
+      function loadTraces() {
+        if(view==='month'){ setTraces([]); return; }
+        const days=view==='week'?getWeekDays(date):[date];
+        api(tracesUrl(ymd(days[0]),ymd(days[days.length-1]))).then(d=>setTraces(d||[])).catch(()=>setTraces([]));
       }
       React.useEffect(loadEvents,[view,date,calendars,selCals]);
 
@@ -1369,6 +1455,10 @@
         return events.filter(e=>selCals.has(e.calendar_id) && !hiddenAreas.has(mine.has(e.category_id)?e.category_id:'none'));
       },[events,selCals,hiddenAreas,cats]);
       const eventDays = React.useMemo(()=>new Set(visible.flatMap(dayKeys)),[visible]);
+      const visibleTraces = React.useMemo(()=>{
+        const mine=new Set(cats.map(c=>c.id));
+        return traces.filter(t=>!hiddenAreas.has(mine.has(t.category_id)?t.category_id:'none'));
+      },[traces,hiddenAreas,cats]);
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
@@ -1401,8 +1491,8 @@
 
             <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               {view==='month'&&<MonthView currentDate={date} events={visible} calendars={calendars} categories={cats} onDayClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
-              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
-              {view==='day'&&<TimeGrid days={[date]} events={visible} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='day'&&<TimeGrid days={[date]} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
             </div>
           </div>
 
@@ -1538,22 +1628,24 @@
         clearTimer(uid);
         const restore=()=>{ if(!getTimer(uid)) setTimer(uid,t); };
         const areaName=(categories.find(c=>c.id===t.category_id)||{}).name;
-        const body={
-          title: t.title || areaName || 'Session',
-          start_time: t.start_time,
-          end_time: new Date().toISOString(),
-          category_id: t.category_id || null,
-        };
+        const endTime=new Date();
+        const mins=Math.max(1, Math.round((endTime-new Date(t.start_time))/60000));
+        // A short session is a trace: it keeps its day and minutes, not a slot on the
+        // grid. A longer one is an event at the times it ran.
+        const asTrace=mins<TRACE_CUTOFF_MIN;
+        const [path,body,notFound]=asTrace
+          ? ['/traces',{ category_id:t.category_id||null, day:ymd(new Date(t.start_time)), minutes:mins, note:t.title||'' },'area not found']
+          : ['/events',{ title:t.title||areaName||'Session', start_time:t.start_time, end_time:endTime.toISOString(), category_id:t.category_id||null },'category not found'];
         try {
           let saved;
           try {
-            saved = await api('/events',{method:'POST',body:JSON.stringify(body)});
+            saved = await api(path,{method:'POST',body:JSON.stringify(body)});
           } catch(ex) {
             // The area was deleted while the timer ran: log the session uncategorized
-            // (what deleting an area does to its existing events) rather than leave it
+            // (what deleting an area does to its existing time) rather than leave it
             // unloggable, with Discard as the only way out.
-            if(!body.category_id || ex.message!=='category not found') throw ex;
-            saved = await api('/events',{method:'POST',body:JSON.stringify({...body,category_id:null})});
+            if(!body.category_id || ex.message!==notFound) throw ex;
+            saved = await api(path,{method:'POST',body:JSON.stringify({...body,category_id:null})});
           }
           // api() resolves undefined on a 401 while it reloads to the login page — that's
           // not a save, so keep the stored timer to Stop again after signing back in.
@@ -1740,7 +1832,7 @@
           // Logged sessions = non all-day events within the selected window, up to now.
           const evs=await api(`/events?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`)||[];
           setLogs(evs.filter(e=>!e.all_day).map(e=>eventToLog(e,catById)));
-          const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`); setStats(s||null);
+          const s=await api(statsUrl(from,to)); setStats(s||null);
         } catch(ex){ setErr(ex.message); }
       }
       React.useEffect(()=>{ loadAll(); },[period]);
@@ -2143,11 +2235,11 @@
           const gs=await api('/category-groups')||[]; setGroups(gs);
           setAreas(resolveAreas(await api('/categories')||[], gs));
           const t=await api('/tasks'); setTasks(t||[]);
-          const s=await api(`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(statsTo.toISOString())}`);
+          const s=await api(statsUrl(from,statsTo));
           const m={}; (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; }); setWeekMins(m);
           const pm={};
           if(to>planFrom){
-            const sp=await api(`/events/stats?from=${encodeURIComponent(planFrom.toISOString())}&to=${encodeURIComponent(to.toISOString())}`);
+            const sp=await api(statsUrl(planFrom,to));
             (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
           }
           setPlannedMins(pm);
@@ -2227,7 +2319,8 @@
     // ─────────────────────────────────────────────
     function Main({ user, onLogout }) {
       const [workspace,setWorkspace]=React.useState('calendar');
-      const nav={ workspace, setWorkspace };
+      const [logDay,setLogDay]=React.useState(null); // a day the Log view should open on
+      const nav={ workspace, setWorkspace, logDay, openLog:day=>{ setLogDay(day); setWorkspace('log'); } };
       if(workspace==='log')   return <LogView user={user} onLogout={onLogout} nav={nav}/>;
       if(workspace==='areas') return <AreasView user={user} onLogout={onLogout} nav={nav}/>;
       return <CalendarApp user={user} onLogout={onLogout} nav={nav}/>;
