@@ -629,7 +629,7 @@
                       </div>
                       {totals.map(a=>(
                         <div key={a.key} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0'}}>
-                          {a.area?.code ? <AreaBadge area={a.area}/> : <span style={{width:8,height:8,borderRadius:'50%',background:a.color,flexShrink:0}}/>}
+                          <AreaMark area={a.area} size={8}/>
                           <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.name}</span>
                           <span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(a.minutes)}</span>
                         </div>
@@ -1527,11 +1527,13 @@
 
     // Shared top bar for the non-calendar workspaces.
     function TopBar({ title, workspace, onWorkspace, user, onLogout, children }) {
+      // On a phone the wordmark and title give way to the controls, which scroll sideways if they still don't fit.
+      const narrow=useNarrow();
       return (
-        <div style={{height:'var(--header-height)',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',padding:'0 20px',gap:12,background:'#fff',flexShrink:0}}>
-          <div style={{fontSize:20,fontWeight:700,color:'var(--accent)',letterSpacing:'-0.03em',marginRight:4}}>Tempo</div>
+        <div style={{height:'var(--header-height)',borderBottom:'1px solid var(--border)',display:'flex',alignItems:'center',padding:narrow?'0 12px':'0 20px',gap:narrow?8:12,background:'#fff',flexShrink:0,whiteSpace:'nowrap',overflowX:narrow?'auto':'visible'}}>
+          {!narrow&&<div style={{fontSize:20,fontWeight:700,color:'var(--accent)',letterSpacing:'-0.03em',marginRight:4}}>Tempo</div>}
           <WorkspaceNav workspace={workspace} onWorkspace={onWorkspace}/>
-          <div style={{fontWeight:600,fontSize:16,flex:1,minWidth:0}}>{title}</div>
+          <div style={{fontWeight:600,fontSize:16,flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis'}}>{narrow?'':title}</div>
           {children}
           <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:4}}>
             <div style={{width:32,height:32,borderRadius:'50%',background:'var(--accent)',color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,fontWeight:700,flexShrink:0}}>
@@ -1702,300 +1704,533 @@
     }
 
     // ─────────────────────────────────────────────
-    // LOG VIEW — record sessions, see weekly stats
+    // LOG VIEW — traces by day, and a ledger of events + traces
     // ─────────────────────────────────────────────
-    // Rolls stats areas up by category group (largest first), ungrouped Areas
-    // and "Uncategorized" last under a null group.
-    function statsSections(areas) {
-      const m=new Map();
-      areas.forEach(a=>{
-        const k=a.group_id||'';
-        if(!m.has(k)) m.set(k,{ id:a.group_id||null, name:a.group_name||'', color:a.group_color||'', areas:[], total:0, target:0 });
-        const sec=m.get(k); sec.areas.push(a); sec.total+=a.total_minutes; sec.target+=a.weekly_target_minutes||0;
-      });
-      return [...m.values()].sort((x,y)=>(!x.id)-(!y.id)||y.total-x.total);
+    // Traces render hatched, next to events' solid fills, wherever the two are summed.
+    const hatch = c => `repeating-linear-gradient(135deg, ${c} 0 2px, #fff 2px 4px)`;
+    const dayDate = k => new Date(`${k}T12:00:00`); // 'YYYY-MM-DD' → that local day (noon, clear of DST edges)
+
+    function useNarrow(query='(max-width: 640px)') {
+      const [narrow,setNarrow]=React.useState(()=>window.matchMedia(query).matches);
+      React.useEffect(()=>{
+        const mq=window.matchMedia(query), f=e=>setNarrow(e.matches);
+        mq.addEventListener('change',f); return ()=>mq.removeEventListener('change',f);
+      },[query]);
+      return narrow;
     }
 
-    function StatsPanel({ stats, label='This week', showTargets=true }) {
-      if(!stats) return null;
-      const areas=(stats.areas||[]).slice().sort((a,b)=>b.total_minutes-a.total_minutes);
-      const grand=areas.reduce((s,a)=>s+a.total_minutes,0);
-      const sections=statsSections(areas);
-      const grouped=sections.some(sec=>sec.id);
-      return (
-        <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18}}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:14}}>
-            <div style={{fontSize:14,fontWeight:600}}>{label}</div>
-            <div style={{fontSize:13,color:'var(--text-muted)'}}>{fmtMins(grand)} total</div>
-          </div>
-          {areas.length===0&&<div style={{color:'var(--text-muted)',fontSize:14}}>Nothing logged in this period yet.</div>}
-          {sections.map(sec=>(
-            <div key={sec.id||'none'} style={grouped?{marginBottom:6}:null}>
-              {grouped&&(
-                <div style={{display:'flex',alignItems:'baseline',gap:8,padding:'6px 0 8px',borderTop:'1px solid var(--border)'}}>
-                  <span style={{fontSize:12,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.04em',color:'var(--text-muted)',flex:1}}>{sec.id?sec.name:'Ungrouped'}</span>
-                  <span style={{fontSize:12,color:'var(--text-muted)',fontFamily:'var(--font-mono)'}}>
-                    {fmtMins(sec.total)}{showTargets&&sec.target>0?` / ${fmtMins(sec.target)}`:''}
-                  </span>
-                </div>
-              )}
-          {sec.areas.map(a=>{
-            const tgt=showTargets?(a.weekly_target_minutes||0):0;
-            const pct=tgt>0?Math.min(100,Math.round(a.total_minutes/tgt*100)):(grand>0?Math.round(a.total_minutes/grand*100):0);
-            return (
-              <div key={a.area_id||'none'} style={{marginBottom:12}}>
-                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
-                  {a.area_code
-                    ? <AreaBadge area={{code:a.area_code,color:a.group_color||a.area_color}}/>
-                    : <span style={{width:10,height:10,borderRadius:'50%',background:a.area_color||'#cbd5e1',flexShrink:0}}/>}
-                  <span style={{fontSize:13,fontWeight:500,flex:1}}>{a.area_name}</span>
-                  <span style={{fontSize:12,color:'var(--text-muted)',fontFamily:'var(--font-mono)'}}>
-                    {fmtMins(a.total_minutes)}{tgt>0?` / ${fmtMins(tgt)}`:''}
-                  </span>
-                </div>
-                <div style={{height:6,borderRadius:3,background:'var(--bg-subtle)',overflow:'hidden'}}>
-                  <div style={{height:'100%',width:`${pct}%`,background:a.group_color||a.area_color||'var(--accent)',borderRadius:3,transition:'0.2s'}}/>
-                </div>
-                {a.sub_activities&&a.sub_activities.length>0&&(
-                  <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:5}}>
-                    {a.sub_activities.slice().sort((x,y)=>y.minutes-x.minutes).map(s=>(
-                      <span key={s.name} style={{fontSize:11,background:'var(--bg-subtle)',borderRadius:12,padding:'2px 8px',color:'var(--text-muted)'}}>{s.name||'—'} · {fmtMins(s.minutes)}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-            </div>
-          ))}
-        </div>
-      );
+    // "5", "5m", "1h", "1h10", "1h10m", "1.5h" → minutes (0 when w isn't a duration).
+    function parseDuration(w) {
+      let m;
+      if((m=w.match(/^(\d+)(?:m|min|mins)?$/i))) return +m[1];
+      if((m=w.match(/^(\d+)h(?:(\d+)(?:m|min|mins)?)?$/i))) return (+m[1])*60+(+(m[2]||0));
+      if((m=w.match(/^(\d*\.\d+)h$/i))) return Math.round(parseFloat(m[1])*60);
+      return 0;
     }
-
-    // A categorized calendar event doubles as a logged session; project it into
-    // the shape the Log view renders (area + sub-activity + duration). Area
-    // name/color are resolved client-side from the categories list, since the
-    // events API returns only category_id.
-    function eventToLog(e, catById) {
-      const c = e.category_id ? catById[e.category_id] : null;
-      const mins = Math.max(0, Math.round((new Date(e.end_time) - new Date(e.start_time)) / 60000));
-      return {
-        id: e.id,
-        area_id: e.category_id || '',
-        area_name: c ? c.name : '',
-        area_color: c ? areaColor(c) : '',
-        sub_activity: e.title || '',
-        duration_minutes: mins,
-        notes: e.description || '',
-        logged_at: e.start_time,
+    // Quick add: "15m fr podcast on the walk" → 15 minutes of the Area coded FR, noted
+    // "podcast on the walk". The Area is looked up by code, then name, then by a prefix
+    // of either that only one Area has; names may be CJK with no word breaks (法文).
+    // Only words before the note can name the Area, so a note word never steals it.
+    function parseQuickAdd(text, areas) {
+      let minutes=0, area=null; const rest=[];
+      const findArea=w=>{
+        const lw=w.toLowerCase(), code=a=>(a.code||'').toLowerCase();
+        const exact=areas.find(a=>code(a)===lw)||areas.find(a=>a.name.toLowerCase()===lw);
+        if(exact) return exact;
+        if(/^[a-z]$/.test(lw)) return null; // one Latin letter is too little to go on
+        const hits=areas.filter(a=>a.name.toLowerCase().startsWith(lw)||code(a).startsWith(lw));
+        return hits.length===1?hits[0]:null;
       };
+      text.trim().split(/\s+/).filter(Boolean).forEach(w=>{
+        if(!minutes){ const m=parseDuration(w); if(m>0){ minutes=m; return; } }
+        if(!area && !rest.length){ const a=findArea(w); if(a){ area=a; return; } }
+        rest.push(w);
+      });
+      return { minutes, area, note:rest.join(' ') };
     }
+
+    // Area marker: its code badge, or a dot when it has no code (or for "No area").
+    // Next to the name, a code that is the whole name (法文) would only repeat it, so
+    // it's a dot there too; `alone` keeps the badge where the name isn't shown.
+    function AreaMark({ area, size=10, alone=false }) {
+      const repeats=area?.code&&area.code===area.name.trim().toUpperCase();
+      return area?.code && (alone||!repeats)
+        ? <AreaBadge area={area} size={size}/>
+        : <span style={{width:size,height:size,borderRadius:'50%',background:areaColor(area),flexShrink:0,display:'inline-block'}}/>;
+    }
+
+    const plusBtn = { flex:1, minWidth:44, height:44, border:'1px solid var(--border)', background:'var(--bg-subtle)', borderRadius:8,
+      fontFamily:'var(--font-mono)', fontSize:14, fontWeight:600, color:'var(--text)', cursor:'pointer' };
 
     function LogView({ user, onLogout, nav }) {
-      const blankForm=()=>({ area_id:'', sub_activity:'', hours:'0', minutes:'30', date:ymd(new Date()), notes:'' });
+      const narrow=useNarrow();
+      const [tab,setTab]=React.useState('day');
+      const [day,setDay]=React.useState(()=>nav.logDay||ymd(new Date()));
       const [areas,setAreas]=React.useState([]);
       const [groups,setGroups]=React.useState([]);
-      const [logs,setLogs]=React.useState([]);
-      const [stats,setStats]=React.useState(null);
-      const [editing,setEditing]=React.useState(null);
-      const [editingStart,setEditingStart]=React.useState(null); // start_time of the entry being edited
-      const [form,setForm]=React.useState(blankForm);
       const [err,setErr]=React.useState('');
-      const [busy,setBusy]=React.useState(false);
+      const [toast,setToast]=React.useState(null); // { text, id } of the trace just added
       const [newArea,setNewArea]=React.useState(false);
-      const [range,setRange]=React.useState('week'); // week|lastweek|month|30d|custom
-      const [customFrom,setCustomFrom]=React.useState(ymd(startOfWeek(new Date())));
-      const [customTo,setCustomTo]=React.useState(ymd(new Date()));
-      const formRef=React.useRef(null);
+      const [version,setVersion]=React.useState(0); // bumped when traces change, so tabs reload
+      const bump=()=>setVersion(v=>v+1);
 
-      // The selected time window. `targets` = compare against weekly Area targets
-      // (only meaningful for week-length ranges); otherwise bars show share of total.
-      const period=React.useMemo(()=>{
-        const now=new Date();
-        if(range==='lastweek'){ const s=addDays(startOfWeek(now),-7); return {from:s,to:addDays(s,7),label:'Last week',targets:true}; }
-        if(range==='month'){ return {from:startOfMonth(now),to:new Date(now.getFullYear(),now.getMonth()+1,1),label:'This month',targets:false}; }
-        if(range==='30d'){ return {from:addDays(now,-30),to:now,label:'Last 30 days',targets:false}; }
-        if(range==='custom'){ return {from:new Date(`${customFrom}T00:00:00`),to:new Date(`${customTo}T23:59:59`),label:'Custom range',targets:false}; }
-        const r=weekRange(now); return {from:r.from,to:r.to,label:'This week',targets:true};
-      },[range,customFrom,customTo]);
-
-      async function loadAll() {
-        try {
-          const now=new Date();
-          const from=period.from;
-          // count elapsed time only, not future plans. '30 days' ends now, not when it was
-          // picked — otherwise sessions logged since (e.g. via the timer) never show up.
-          const to=(range==='30d'||period.to>now)?now:period.to;
-          const gs=await api('/category-groups')||[]; setGroups(gs);
-          const cats=resolveAreas(await api('/categories')||[], gs); setAreas(cats);
-          const catById={}; cats.forEach(c=>{ catById[c.id]=c; });
-          // Logged sessions = non all-day events within the selected window, up to now.
-          const evs=await api(`/events?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`)||[];
-          setLogs(evs.filter(e=>!e.all_day).map(e=>eventToLog(e,catById)));
-          const s=await api(statsUrl(from,to)); setStats(s||null);
-        } catch(ex){ setErr(ex.message); }
-      }
-      React.useEffect(()=>{ loadAll(); },[period]);
-
-      const set=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
-
-      async function submit(e) {
-        e.preventDefault(); setErr('');
-        const mins=(parseInt(form.hours||'0',10)*60)+(parseInt(form.minutes||'0',10));
-        if(!(mins>0)){ setErr('Duration must be greater than zero'); return; }
-        setBusy(true);
-        try {
-          // A log entry is a calendar event; title carries the sub-activity.
-          // The Log view only shows sessions with start_time <= now ("elapsed
-          // time"), so anchor today's entries to end at now — placing them at
-          // noon would hide a morning entry until 12:00. Backdated days keep
-          // noon. Clamp to midnight so an early-morning entry can't spill into
-          // the previous day.
-          let start=null;
-          if(editing && editingStart){
-            // Editing keeps the entry's own start (moved to the new date, same time of
-            // day, if the date changed) — re-anchoring would move a real timed session,
-            // e.g. from the timer, to end at the moment of the edit. Unless that puts its
-            // start in the future, where it would drop out of the log (which lists entries
-            // by start, so one still running stays); then anchor it as below.
-            start=new Date(editingStart);
-            if(form.date!==ymd(start)){ const [y,m,d]=form.date.split('-').map(Number); start.setFullYear(y,m-1,d); }
-            if(start.getTime()>Date.now()) start=null;
-          }
-          if(start){
-            // kept from the entry being edited
-          } else if(form.date===ymd(new Date())){
-            start=new Date(Date.now()-mins*60000);
-            const dayStart=new Date(`${form.date}T00:00:00`);
-            if(start<dayStart) start=dayStart;
-          } else {
-            start=new Date(`${form.date}T12:00:00`);
-          }
-          const end=new Date(start.getTime()+mins*60000);
-          const areaName=(areas.find(a=>a.id===form.area_id)||{}).name;
-          const body={
-            title: form.sub_activity.trim() || areaName || 'Session',
-            description: form.notes.trim(),
-            start_time: start.toISOString(),
-            end_time: end.toISOString(),
-            category_id: form.area_id||null,
-          };
-          if(editing) await api(`/events/${editing}`,{method:'PUT',body:JSON.stringify(body)});
-          else        await api('/events',{method:'POST',body:JSON.stringify(body)});
-          setForm(blankForm()); setEditing(null);
-          await loadAll();
-        } catch(ex){ setErr(ex.message); }
-        finally{ setBusy(false); }
-      }
-
-      function startEdit(l) {
-        setEditing(l.id); setEditingStart(l.logged_at);
-        setForm({ area_id:l.area_id||'', sub_activity:l.sub_activity||'',
-          hours:String(Math.floor(l.duration_minutes/60)), minutes:String(l.duration_minutes%60),
-          date:ymd(new Date(l.logged_at)), notes:l.notes||'' });
-        // The edit form lives at the top of the panel; bring it into view so the
-        // click has a visible effect when the edited entry is scrolled below it.
-        formRef.current?.scrollIntoView({behavior:'smooth',block:'start'});
-      }
-      async function del(id) {
-        if(!confirm('Delete this entry?')) return;
-        try{ await api(`/events/${id}`,{method:'DELETE'}); if(editing===id){setEditing(null);setForm(blankForm());} await loadAll(); }
+      async function loadAreas() {
+        try { const gs=await api('/category-groups')||[]; setGroups(gs); setAreas(resolveAreas(await api('/categories')||[],gs)); }
         catch(ex){ setErr(ex.message); }
       }
+      React.useEffect(()=>{ loadAreas(); },[]);
+      React.useEffect(()=>{ if(!toast) return; const id=setTimeout(()=>setToast(null),5000); return ()=>clearTimeout(id); },[toast]);
 
-      const grouped=React.useMemo(()=>{
-        const m={};
-        logs.forEach(l=>{ const k=ymd(new Date(l.logged_at)); (m[k]=m[k]||[]).push(l); });
-        return Object.entries(m).sort((a,b)=>a[0]<b[0]?1:-1);
-      },[logs]);
+      // Adds a trace ({category_id, day, minutes, note}), for the tiles, quick add and ledger.
+      async function addTrace(body) {
+        setErr('');
+        try {
+          const t=await api('/traces',{method:'POST',body:JSON.stringify(body)});
+          if(!t) return null;
+          const a=areas.find(x=>x.id===t.category_id);
+          setToast({ text:`+${fmtMins(t.minutes)} ${a?(a.code||a.name):'No area'}`, id:t.id });
+          bump();
+          return t;
+        } catch(ex){ setErr(ex.message); return null; }
+      }
+      async function undo() {
+        const t=toast; setToast(null); if(!t) return;
+        try { await api(`/traces/${t.id}`,{method:'DELETE'}); }
+        catch(ex){ if(ex.message!=='not found') setErr(ex.message); }
+        bump();
+      }
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
           <TopBar title="Time Log" workspace={nav.workspace} onWorkspace={nav.setWorkspace} user={user} onLogout={onLogout}>
-            <TimerChip user={user} onLogged={loadAll}/>
+            <TimerChip user={user} onLogged={bump}/>
           </TopBar>
           <div style={{flex:1,overflow:'auto',background:'var(--bg-subtle)'}}>
-            <div style={{maxWidth:860,margin:'0 auto',padding:'24px 20px 60px'}}>
-              <form ref={formRef} onSubmit={submit} style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:18,marginBottom:24}}>
-                <div style={{fontSize:14,fontWeight:600,marginBottom:14}}>{editing?'Edit entry':'Log time'}</div>
-                <div style={{display:'grid',gridTemplateColumns:'1.3fr 1.3fr 0.7fr 0.7fr 1.1fr',gap:10,alignItems:'end'}}>
-                  <div>
-                    <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
-                      <label style={S.label}>Area</label>
-                      <button type="button" onClick={()=>setNewArea(true)} style={{...S.iconBtn,fontSize:12,padding:'0 2px',color:'var(--accent)',fontWeight:600}}>+ New</button>
-                    </div>
-                    <select style={S.input} value={form.area_id} onChange={set('area_id')}>
-                      <option value="">No area</option>
-                      {areaOptions(areas,groups)}
-                    </select></div>
-                  <div><label style={S.label}>Activity</label><input style={S.input} value={form.sub_activity} onChange={set('sub_activity')} placeholder="reading…"/></div>
-                  <div><label style={S.label}>Hours</label><input style={S.input} type="number" min="0" value={form.hours} onChange={set('hours')}/></div>
-                  <div><label style={S.label}>Min</label><input style={S.input} type="number" min="0" max="59" value={form.minutes} onChange={set('minutes')}/></div>
-                  <div><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={set('date')}/></div>
-                </div>
-                <div style={{marginTop:10}}><label style={S.label}>Notes</label><input style={S.input} value={form.notes} onChange={set('notes')} placeholder="optional details…"/></div>
-                {err&&<div style={{color:'#dc2626',fontSize:13,marginTop:10}}>{err}</div>}
-                <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}}>
-                  {editing&&<button type="button" style={S.btnOut} onClick={()=>{setEditing(null);setForm(blankForm());setErr('');}}>Cancel</button>}
-                  <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':(editing?'Update':'Add entry')}</button>
-                </div>
-              </form>
-
-              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,flexWrap:'wrap'}}>
+            <div style={{maxWidth:1180,margin:'0 auto',padding:narrow?'16px 16px 80px':'24px 24px 80px'}}>
+              <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:16,flexWrap:'wrap'}}>
                 <div style={{display:'flex',background:'#fff',border:'1px solid var(--border)',borderRadius:8,padding:2,gap:1}}>
-                  {[['week','This week'],['lastweek','Last week'],['month','This month'],['30d','30 days'],['custom','Custom']].map(([k,label])=>(
-                    <button key={k} onClick={()=>setRange(k)} style={{
-                      padding:'5px 12px',borderRadius:6,border:'none',cursor:'pointer',fontSize:13,fontWeight:500,
-                      background:range===k?'var(--accent)':'transparent',
-                      color:range===k?'#fff':'var(--text-muted)',transition:'0.1s'}}>{label}</button>
+                  {[['day','Day'],['week','Ledger']].map(([k,label])=>(
+                    <button key={k} onClick={()=>setTab(k)} style={{
+                      padding:'6px 14px',borderRadius:6,border:'none',cursor:'pointer',fontSize:13,fontWeight:500,
+                      background:tab===k?'var(--accent)':'transparent',color:tab===k?'#fff':'var(--text-muted)'}}>{label}</button>
                   ))}
                 </div>
-                {range==='custom'&&(
-                  <div style={{display:'flex',alignItems:'center',gap:6}}>
-                    <input type="date" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customFrom} max={customTo} onChange={e=>setCustomFrom(e.target.value)}/>
-                    <span style={{color:'var(--text-muted)',fontSize:13}}>→</span>
-                    <input type="date" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customTo} min={customFrom} onChange={e=>setCustomTo(e.target.value)}/>
-                  </div>
-                )}
+                {err&&<div style={{color:'#dc2626',fontSize:13}}>{err}</div>}
               </div>
+              {tab==='day'
+                ? <DayLog day={day} setDay={setDay} areas={areas} groups={groups} version={version} bump={bump}
+                    addTrace={addTrace} onError={setErr} narrow={narrow} onNewArea={()=>setNewArea(true)}
+                    onCalendar={()=>nav.setWorkspace('calendar')}/>
+                : <TraceLedger user={user} areas={areas} groups={groups} version={version} addTrace={addTrace} onError={setErr}/>}
+            </div>
+          </div>
+          {toast&&(
+            <div role="status" style={{position:'fixed',left:'50%',transform:'translateX(-50%)',bottom:24,zIndex:500,width:'min(420px, calc(100vw - 32px))',boxSizing:'border-box',
+              background:'#111827',color:'#fff',borderRadius:12,padding:'0 8px 0 16px',height:52,display:'flex',alignItems:'center',gap:10,boxShadow:'0 10px 30px rgba(17,24,39,0.25)'}}>
+              <span style={{flex:1,fontSize:14}}>Added <strong style={{fontFamily:'var(--font-mono)'}}>{toast.text}</strong></span>
+              <button type="button" onClick={undo} style={{height:40,padding:'0 14px',background:'transparent',border:'none',color:'#a5b4fc',fontSize:14,fontWeight:700,cursor:'pointer'}}>Undo</button>
+            </div>
+          )}
+          {newArea&&<AreaModal groups={groups} onClose={()=>setNewArea(false)}
+            onSaved={cat=>{ setAreas(as=>resolveAreas([...as,cat],groups)); setNewArea(false); }}/>}
+        </div>
+      );
+    }
 
-              <StatsPanel stats={stats} label={period.label} showTargets={period.targets}/>
+    // One day's traces: quick add, a tile per Area, the day's trail, and the week so far.
+    function DayLog({ day, setDay, areas, groups, version, bump, addTrace, onError, narrow, onNewArea, onCalendar }) {
+      const [traces,setTraces]=React.useState([]);
+      const [week,setWeek]=React.useState(null);
+      const [draft,setDraft]=React.useState('');
+      const [editing,setEditing]=React.useState(null); // { id, minutes, category_id, note }
+      const today=ymd(new Date());
 
-              <div style={{marginTop:24}}>
-                <div style={{fontSize:13,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:10}}>Entries</div>
-                {grouped.length===0&&<div style={{color:'var(--text-muted)',fontSize:14,padding:'20px 0'}}>No entries yet — log your first session above.</div>}
-                {grouped.map(([day,items])=>{
-                  const total=items.reduce((s,l)=>s+l.duration_minutes,0);
+      React.useEffect(()=>{
+        let live=true;
+        (async()=>{
+          try {
+            const ts=await api(tracesUrl(day,day))||[];
+            // The week holding the day, counted up to now.
+            const from=startOfWeek(dayDate(day)), now=new Date();
+            const end=addDays(from,7), to=end>now?now:end;
+            const st=from<to?await api(statsUrl(from,to)):null;
+            if(live){ setTraces(ts); setWeek(st); }
+          } catch(ex){ if(live) onError(ex.message); }
+        })();
+        return ()=>{ live=false; };
+      },[day,version]);
+
+      const ordered=React.useMemo(()=>groupAreas(areas,groups).flatMap(s=>s.areas),[areas,groups]);
+      const byId=React.useMemo(()=>Object.fromEntries(areas.map(a=>[a.id,a])),[areas]);
+      const dayMins=React.useMemo(()=>{ const m={}; traces.forEach(t=>{ const k=t.category_id||'none'; m[k]=(m[k]||0)+t.minutes; }); return m; },[traces]);
+      const total=traces.reduce((n,t)=>n+t.minutes,0);
+      const parsed=parseQuickAdd(draft,areas);
+      const canAdd=parsed.minutes>0&&parsed.minutes<=1440;
+
+      async function quickAdd(e) {
+        e.preventDefault();
+        if(!canAdd) return;
+        const t=await addTrace({ category_id:parsed.area?.id||null, day, minutes:parsed.minutes, note:parsed.note });
+        if(t) setDraft('');
+      }
+      async function saveEdit(e) {
+        e.preventDefault();
+        const mins=parseInt(editing.minutes,10);
+        if(!(mins>=1&&mins<=1440)){ onError('Minutes must be between 1 and 1440'); return; }
+        try {
+          await api(`/traces/${editing.id}`,{method:'PUT',body:JSON.stringify({ minutes:mins, category_id:editing.category_id||null, note:editing.note.trim() })});
+          setEditing(null); onError(''); bump();
+        } catch(ex){ onError(ex.message); }
+      }
+      async function del(id) {
+        try { await api(`/traces/${id}`,{method:'DELETE'}); if(editing?.id===id) setEditing(null); bump(); }
+        catch(ex){ onError(ex.message); }
+      }
+
+      const label = day===today ? 'Today' : day===ymd(addDays(new Date(),-1)) ? 'Yesterday' : dayDate(day).toLocaleDateString([],{weekday:'long'});
+      const card = { background:'#fff', border:'1px solid var(--border)', borderRadius:12 };
+
+      // This week's bars: Areas with time or a target, events solid and traces hatched.
+      const weekRows=React.useMemo(()=>{
+        const stats=week?.areas||[], byArea=Object.fromEntries(stats.map(s=>[s.area_id||'none',s]));
+        const rows=ordered.map(a=>({ area:a, s:byArea[a.id] })).filter(r=>r.s||(r.area.weekly_target_minutes||0)>0);
+        if(byArea.none) rows.push({ area:null, s:byArea.none });
+        const maxTotal=Math.max(1,...rows.map(r=>r.s?.total_minutes||0));
+        return rows.map(({area,s})=>{
+          const ev=s?.event_minutes||0, tr=s?.trace_minutes||0, tgt=area?.weekly_target_minutes||0;
+          const scale=tgt>0?Math.max(tgt,ev+tr):maxTotal;
+          return { area, ev, tr, tgt, evPct:ev/scale*100, trPct:tr/scale*100 };
+        });
+      },[week,ordered]);
+
+      return (
+        <div style={{display:'flex',gap:24,alignItems:'flex-start',flexDirection:narrow?'column':'row'}}>
+          <div style={{flex:1,minWidth:0,width:'100%',display:'flex',flexDirection:'column',gap:16}}>
+            <div style={{display:'flex',alignItems:'flex-end',justifyContent:'space-between',gap:12}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                <button type="button" aria-label="Previous day" onClick={()=>setDay(ymd(addDays(dayDate(day),-1)))} style={{...S.btnOut,padding:'6px 12px'}}>‹</button>
+                <button type="button" aria-label="Next day" disabled={day>=today} onClick={()=>setDay(ymd(addDays(dayDate(day),1)))} style={{...S.btnOut,padding:'6px 12px',opacity:day>=today?0.4:1}}>›</button>
+                <div style={{fontSize:22,fontWeight:700,marginLeft:6}}>{label}</div>
+                <div style={{fontSize:14,color:'var(--text-muted)'}}>{dayDate(day).toLocaleDateString([],{month:'short',day:'numeric',year:day.slice(0,4)===today.slice(0,4)?undefined:'numeric'})}</div>
+                {day!==today&&<button type="button" onClick={()=>setDay(today)} style={{...S.iconBtn,fontSize:13,color:'var(--accent)',fontWeight:600}}>Today</button>}
+              </div>
+              <div style={{textAlign:'right',flexShrink:0}}>
+                <div style={{fontSize:11,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em',fontWeight:500}}>Traced</div>
+                <div style={{fontFamily:'var(--font-mono)',fontSize:24,fontWeight:600}}>{fmtMins(total)}</div>
+              </div>
+            </div>
+
+            <form onSubmit={quickAdd} style={{...card,padding:'14px 16px'}}>
+              <label htmlFor="quick-add" style={S.label}>Quick add</label>
+              <div style={{display:'flex',gap:8}}>
+                <input id="quick-add" style={{...S.input,height:44,fontFamily:'var(--font-mono)',fontSize:15}} value={draft} onChange={e=>setDraft(e.target.value)}
+                  placeholder="15m fr podcast on the walk" autoComplete="off"/>
+                <button type="submit" disabled={!canAdd} style={{...S.btnPri,height:44,opacity:canAdd?1:0.5}}>Add</button>
+              </div>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginTop:8,minHeight:22,fontSize:13,color:'var(--text-muted)',flexWrap:'wrap'}}>
+                {canAdd ? <>
+                  <span>Will add</span>
+                  <strong style={{fontFamily:'var(--font-mono)',color:'var(--text)'}}>{fmtMins(parsed.minutes)}</strong>
+                  <span>to</span>
+                  <span style={{display:'inline-flex',alignItems:'center',gap:5,color:'var(--text)',fontWeight:500}}><AreaMark area={parsed.area}/>{parsed.area?parsed.area.name:'No area'}</span>
+                  {parsed.note&&<span>· “{parsed.note}”</span>}
+                </> : <span>A duration (5m, 1h10), then an area code or name; the rest becomes a note. Enter adds.</span>}
+              </div>
+            </form>
+
+            <div style={narrow
+              ? {...card,display:'flex',flexDirection:'column'}
+              : {display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(230px,1fr))',gap:12}}>
+              {ordered.map((a,i)=>{
+                const m=dayMins[a.id]||0;
+                const add=n=>addTrace({ category_id:a.id, day, minutes:n, note:'' });
+                return narrow ? (
+                  <div key={a.id} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',borderTop:i?'1px solid var(--border)':'none'}}>
+                    <AreaMark area={a} size={12}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:15,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.name}</div>
+                      <div style={{fontSize:12,color:'var(--text-muted)',fontFamily:'var(--font-mono)'}}>{fmtMins(m)}</div>
+                    </div>
+                    <button type="button" aria-label={`Add 5 minutes to ${a.name}`} onClick={()=>add(5)} style={{...plusBtn,flex:'none',width:52}}>+5</button>
+                    <button type="button" aria-label={`Add 15 minutes to ${a.name}`} onClick={()=>add(15)} style={{...plusBtn,flex:'none',width:52}}>+15</button>
+                  </div>
+                ) : (
+                  <div key={a.id} style={{...card,padding:14,display:'flex',flexDirection:'column',gap:12}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8}}>
+                      <AreaMark area={a} size={11}/>
+                      <span style={{fontSize:14,fontWeight:600,flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{a.name}</span>
+                      <span style={{fontFamily:'var(--font-mono)',fontSize:15,fontWeight:600,color:m?'var(--text)':'#9ca3af'}}>{fmtMins(m)}</span>
+                    </div>
+                    <div style={{display:'flex',gap:6}}>
+                      {[5,15,30].map(n=>(
+                        <button key={n} type="button" aria-label={`Add ${n} minutes to ${a.name}`} onClick={()=>add(n)} style={plusBtn}>+{n}</button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {ordered.length===0&&(
+                <div style={{...card,padding:16,fontSize:14,color:'var(--text-muted)'}}>
+                  No areas yet. <button type="button" onClick={onNewArea} style={{...S.iconBtn,display:'inline',padding:0,fontSize:14,color:'var(--accent)',fontWeight:600}}>Create one</button> to trace time against it.
+                </div>
+              )}
+            </div>
+
+            <div style={card}>
+              <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:8,padding:'12px 16px',borderBottom:'1px solid var(--border)'}}>
+                <div style={{fontSize:13,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em'}}>Trail</div>
+                <div style={{fontSize:12,color:'var(--text-muted)'}}>times are when you noted it</div>
+              </div>
+              {traces.length===0&&<div style={{padding:'16px',fontSize:14,color:'var(--text-muted)'}}>Nothing traced on this day.</div>}
+              {traces.map((t,i)=>{
+                const a=byId[t.category_id]||null;
+                if(editing?.id===t.id) return (
+                  <form key={t.id} onSubmit={saveEdit} style={{display:'flex',gap:8,alignItems:'center',padding:'8px 12px',borderTop:i?'1px solid var(--border)':'none',flexWrap:'wrap',background:'var(--accent-light)'}}>
+                    <input aria-label="Minutes" type="number" min="1" max="1440" value={editing.minutes} onChange={e=>setEditing(x=>({...x,minutes:e.target.value}))} style={{...S.input,width:80}} autoFocus/>
+                    <select aria-label="Area" value={editing.category_id} onChange={e=>setEditing(x=>({...x,category_id:e.target.value}))} style={{...S.input,width:'auto',flex:'1 1 140px'}}>
+                      <option value="">No area</option>
+                      {areaOptions(areas,groups)}
+                    </select>
+                    <input aria-label="Note" value={editing.note} onChange={e=>setEditing(x=>({...x,note:e.target.value}))} placeholder="note" style={{...S.input,flex:'2 1 160px',width:'auto'}}/>
+                    <button type="button" onClick={()=>setEditing(null)} style={S.btnOut}>Cancel</button>
+                    <button type="submit" style={S.btnPri}>Save</button>
+                  </form>
+                );
+                return (
+                  <div key={t.id} style={{display:'flex',alignItems:'center',gap:4,padding:'2px 8px 2px 4px',borderTop:i?'1px solid var(--border)':'none'}}>
+                    <button type="button" title="Edit" onClick={()=>setEditing({ id:t.id, minutes:String(t.minutes), category_id:t.category_id||'', note:t.note||'' })}
+                      style={{flex:1,minWidth:0,display:'flex',alignItems:'center',gap:12,padding:'8px',background:'none',border:'none',cursor:'pointer',textAlign:'left',color:'var(--text)',fontSize:13}}>
+                      <span style={{fontFamily:'var(--font-mono)',fontSize:12,color:'var(--text-muted)',width:40,flexShrink:0}}>{hhmm(new Date(t.created_at))}</span>
+                      <AreaMark area={a} alone={!!t.note}/>
+                      <span style={{fontFamily:'var(--font-mono)',fontWeight:600,width:52,flexShrink:0}}>{fmtMins(t.minutes)}</span>
+                      <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:t.note?'var(--text)':'#9ca3af'}}>{t.note||(a?a.name:'No area')}</span>
+                    </button>
+                    <button type="button" aria-label="Delete trace" onClick={()=>del(t.id)} style={{...S.iconBtn,color:'#9ca3af',width:36,height:36,justifyContent:'center'}}>×</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <aside style={{width:narrow?'100%':320,flexShrink:0,display:'flex',flexDirection:'column',gap:16}}>
+            <div style={{...card,padding:16}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:6}}>
+                <div style={{fontSize:14,fontWeight:600}}>This week</div>
+                <div style={{fontSize:12,color:'var(--text-muted)'}}>from {startOfWeek(dayDate(day)).toLocaleDateString([],{month:'short',day:'numeric'})}</div>
+              </div>
+              <div style={{display:'flex',gap:12,fontSize:11,color:'var(--text-muted)',marginBottom:14,flexWrap:'wrap'}}>
+                <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:14,height:8,borderRadius:2,background:'#6b7280'}}/>Events</span>
+                <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:14,height:8,borderRadius:2,background:hatch('#6b7280')}}/>Traces</span>
+                <span>Full bar = target</span>
+              </div>
+              {weekRows.length===0&&<div style={{fontSize:13,color:'var(--text-muted)'}}>Nothing tracked yet this week.</div>}
+              <div style={{display:'flex',flexDirection:'column',gap:12}}>
+                {weekRows.map(r=>{
+                  const c=areaColor(r.area);
                   return (
-                    <div key={day} style={{marginBottom:18}}>
-                      <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:6}}>
-                        <div style={{fontSize:13,fontWeight:600}}>{new Date(day+'T12:00:00').toLocaleDateString([],{weekday:'long',month:'short',day:'numeric'})}</div>
-                        <div style={{fontSize:12,color:'var(--text-muted)'}}>{fmtMins(total)}</div>
+                    <div key={r.area?.id||'none'}>
+                      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                        <AreaMark area={r.area}/>
+                        <span style={{fontSize:13,fontWeight:500,flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.area?r.area.name:'No area'}</span>
+                        <span style={{fontFamily:'var(--font-mono)',fontSize:12,color:'var(--text-muted)'}}>{fmtMins(r.ev+r.tr)}{r.tgt?` / ${fmtMins(r.tgt)}`:''}</span>
                       </div>
-                      <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
-                        {items.map((l,idx)=>(
-                          <div key={l.id} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 12px',borderTop:idx?'1px solid var(--border)':'none'}}>
-                            <span style={{width:10,height:10,borderRadius:'50%',background:l.area_color||'#cbd5e1',flexShrink:0}}/>
-                            <div style={{flex:1,minWidth:0}}>
-                              <div style={{fontSize:13,fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
-                                {l.area_name||'No area'}{l.sub_activity?<span style={{color:'var(--text-muted)',fontWeight:400}}> · {l.sub_activity}</span>:null}
-                              </div>
-                              {l.notes&&<div style={{fontSize:12,color:'var(--text-muted)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{l.notes}</div>}
-                            </div>
-                            <div style={{fontSize:13,fontFamily:'var(--font-mono)'}}>{fmtMins(l.duration_minutes)}</div>
-                            <button style={S.iconBtn} title="Edit" onClick={()=>startEdit(l)}>✎</button>
-                            <button style={{...S.iconBtn,color:'#dc2626'}} title="Delete" onClick={()=>del(l.id)}>×</button>
-                          </div>
-                        ))}
+                      <div style={{display:'flex',height:8,borderRadius:4,background:'#f3f4f6',overflow:'hidden'}}>
+                        <div style={{width:`${r.evPct}%`,background:c}} title={`Events ${fmtMins(r.ev)}`}/>
+                        <div style={{width:`${r.trPct}%`,background:hatch(c)}} title={`Traces ${fmtMins(r.tr)}`}/>
                       </div>
                     </div>
                   );
                 })}
               </div>
             </div>
+            <div style={{...card,padding:16,fontSize:13,color:'#374151',display:'flex',flexDirection:'column',gap:8}}>
+              <div style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>Did something longer?</div>
+              <div>Anything with a real start time belongs on the calendar.</div>
+              <button type="button" onClick={onCalendar} style={{...S.iconBtn,padding:0,fontSize:13,fontWeight:600,color:'var(--accent)'}}>Put a session on the calendar →</button>
+            </div>
+          </aside>
+        </div>
+      );
+    }
+
+    // Areas × days, summing categorized events (solid) and traces (hatched). Counts
+    // what has started by now, like the stats; an event counts on the day it starts.
+    function TraceLedger({ user, areas, groups, version, addTrace, onError }) {
+      const [range,setRange]=React.useState('week'); // week|lastweek|month|custom
+      const [customFrom,setCustomFrom]=React.useState(ymd(startOfWeek(new Date())));
+      const [customTo,setCustomTo]=React.useState(ymd(new Date()));
+      const [events,setEvents]=React.useState([]);
+      const [traces,setTraces]=React.useState([]);
+      const [open,setOpen]=React.useState(null); // { id:`${rowKey}|${day}`, top, left } of the open cell's popover
+
+      const period=React.useMemo(()=>{
+        const now=new Date();
+        if(range==='lastweek'){ const s=addDays(startOfWeek(now),-7); return {from:s,to:addDays(s,7),targets:true}; }
+        if(range==='month'){ return {from:startOfMonth(now),to:new Date(now.getFullYear(),now.getMonth()+1,1),targets:false}; }
+        if(range==='custom'){ const f=dayDate(customFrom), t=dayDate(customTo); f.setHours(0,0,0,0); t.setHours(0,0,0,0);
+          return {from:f,to:addDays(t<f?f:t,1),targets:false}; }
+        const r=weekRange(now); return {from:r.from,to:r.to,targets:true};
+      },[range,customFrom,customTo]);
+      const days=React.useMemo(()=>{
+        const out=[]; for(let d=new Date(period.from); d<period.to && out.length<62; d=addDays(d,1)) out.push(ymd(d));
+        return out;
+      },[period]);
+
+      React.useEffect(()=>{
+        let live=true;
+        (async()=>{
+          try {
+            const now=new Date(), to=period.to>now?now:period.to;
+            const evs=period.from<to?await api(`/events?from=${encodeURIComponent(period.from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`)||[]:[];
+            const ts=await api(tracesUrl(days[0],days[days.length-1]))||[];
+            if(live){ setEvents(evs); setTraces(ts); }
+          } catch(ex){ if(live) onError(ex.message); }
+        })();
+        return ()=>{ live=false; };
+      },[period,days,version]);
+
+      const today=ymd(new Date());
+      const { rows, dayTotals, grand }=React.useMemo(()=>{
+        const mine=new Set(areas.map(a=>a.id)), now=Date.now();
+        const cell={}; // rowKey → day → { ev:[], tr:[], evMin, trMin }
+        const at=(k,d)=>{ cell[k]=cell[k]||{}; return cell[k][d]=cell[k][d]||{ ev:[], tr:[], evMin:0, trMin:0 }; };
+        // Only your own categorized, timed events: an event with no Area is an
+        // appointment, not tracked time, and a shared calendar's aren't yours.
+        events.forEach(e=>{
+          if(e.all_day||!mine.has(e.category_id)||(e.owner_id&&e.owner_id!==user.id)) return;
+          if(new Date(e.start_time).getTime()>now) return;
+          const c=at(e.category_id,ymd(new Date(e.start_time)));
+          c.ev.push(e); c.evMin+=Math.max(0,Math.round((new Date(e.end_time)-new Date(e.start_time))/60000));
+        });
+        traces.forEach(t=>{ const c=at(mine.has(t.category_id)?t.category_id:'none',t.day); c.tr.push(t); c.trMin+=t.minutes; });
+        const ordered=groupAreas(areas,groups).flatMap(s=>s.areas);
+        const list=ordered.filter(a=>cell[a.id]||(period.targets&&a.weekly_target_minutes>0)).map(a=>({ key:a.id, area:a }));
+        if(cell.none) list.push({ key:'none', area:null });
+        const dayTotals={}; let grand=0;
+        const rows=list.map(r=>{
+          let ev=0,tr=0;
+          days.forEach(d=>{ const c=cell[r.key]?.[d]; if(c){ ev+=c.evMin; tr+=c.trMin; dayTotals[d]=(dayTotals[d]||0)+c.evMin+c.trMin; } });
+          grand+=ev+tr;
+          return { ...r, cells:cell[r.key]||{}, ev, tr, tgt:period.targets?(r.area?.weekly_target_minutes||0):0 };
+        });
+        return { rows, dayTotals, grand };
+      },[events,traces,areas,groups,days,period,user]);
+
+      const cellMax=Math.max(60,...rows.flatMap(r=>days.map(d=>{ const c=r.cells[d]; return c?c.evMin+c.trMin:0; })));
+      const cols=`minmax(140px,180px) repeat(${days.length}, minmax(58px,1fr)) 128px`;
+      const head={fontSize:11,fontWeight:600,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.04em'};
+
+      return (
+        <div>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,flexWrap:'wrap'}}>
+            <div style={{display:'flex',background:'#fff',border:'1px solid var(--border)',borderRadius:8,padding:2,gap:1}}>
+              {[['week','This week'],['lastweek','Last week'],['month','This month'],['custom','Custom']].map(([k,label])=>(
+                <button key={k} onClick={()=>setRange(k)} style={{
+                  padding:'5px 12px',borderRadius:6,border:'none',cursor:'pointer',fontSize:13,fontWeight:500,
+                  background:range===k?'var(--accent)':'transparent',color:range===k?'#fff':'var(--text-muted)'}}>{label}</button>
+              ))}
+            </div>
+            {range==='custom'&&(
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <input type="date" aria-label="From" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customFrom} max={customTo} onChange={e=>setCustomFrom(e.target.value)}/>
+                <span style={{color:'var(--text-muted)',fontSize:13}}>→</span>
+                <input type="date" aria-label="To" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customTo} min={customFrom} onChange={e=>setCustomTo(e.target.value)}/>
+              </div>
+            )}
+            <div style={{display:'flex',gap:12,fontSize:12,color:'var(--text-muted)',marginLeft:'auto'}}>
+              <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:14,height:8,borderRadius:2,background:'#6b7280'}}/>Events</span>
+              <span style={{display:'flex',alignItems:'center',gap:5}}><span style={{width:14,height:8,borderRadius:2,background:hatch('#6b7280')}}/>Traces</span>
+            </div>
           </div>
-          {newArea&&<AreaModal groups={groups} onClose={()=>setNewArea(false)}
-            onSaved={cat=>{ setAreas(as=>resolveAreas([...as,cat],groups)); setForm(f=>({...f,area_id:cat.id})); setNewArea(false); }}/>}
+
+          <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,overflowX:'auto'}}>
+            <div style={{minWidth:'fit-content'}}>
+              <div style={{display:'grid',gridTemplateColumns:cols,borderBottom:'1px solid var(--border)'}}>
+                <div style={{...head,padding:'10px 14px'}}>Area</div>
+                {days.map(d=>(
+                  <div key={d} style={{...head,padding:'10px 4px',textAlign:'center',color:d===today?'var(--accent)':d>today?'#9ca3af':head.color,background:d===today?'var(--accent-light)':'transparent'}}>
+                    {dayDate(d).toLocaleDateString([],{weekday:'short'})} {dayDate(d).getDate()}
+                  </div>
+                ))}
+                <div style={{...head,padding:'10px 14px',textAlign:'right'}}>{period.targets?'Total / target':'Total'}</div>
+              </div>
+              {rows.length===0&&<div style={{padding:16,fontSize:14,color:'var(--text-muted)'}}>Nothing tracked in this range.</div>}
+              {rows.map(r=>{
+                const c=areaColor(r.area), scale=r.tgt>0?Math.max(r.tgt,r.ev+r.tr):Math.max(1,grand);
+                return (
+                  <div key={r.key} style={{display:'grid',gridTemplateColumns:cols,borderBottom:'1px solid #f3f4f6',minHeight:56}}>
+                    <div style={{padding:'0 14px',display:'flex',alignItems:'center',gap:8,minWidth:0}}>
+                      <AreaMark area={r.area}/>
+                      <span style={{fontSize:14,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.area?r.area.name:'No area'}</span>
+                    </div>
+                    {days.map(d=>{
+                      const x=r.cells[d], sum=x?x.evMin+x.trMin:0, id=`${r.key}|${d}`, future=d>today;
+                      return (
+                        <div key={d} style={{background:d===today?'#f5f7ff':future?'#fcfcfd':'#fff',boxShadow:open?.id===id?'inset 0 0 0 2px var(--accent)':'none'}}>
+                          <button type="button" disabled={future} onClick={e=>{
+                              // Fixed to the viewport: the table's sideways scroll would clip it.
+                              const b=e.currentTarget.getBoundingClientRect(), w=270;
+                              setOpen(o=>o?.id===id?null:{ id, top:b.bottom+4, left:Math.max(8,Math.min(b.left,window.innerWidth-w-8)) });
+                            }} aria-label={`${r.area?r.area.name:'No area'}, ${d}`}
+                            style={{width:'100%',height:'100%',minHeight:56,padding:'8px 6px',border:'none',background:'transparent',cursor:future?'default':'pointer',display:'flex',flexDirection:'column',justifyContent:'center',gap:5}}>
+                            <span style={{fontFamily:'var(--font-mono)',fontSize:13,textAlign:'center',color:sum?'var(--text)':'#d1d5db'}}>{future?'':sum?fmtMins(sum):'·'}</span>
+                            {!future&&<span style={{display:'flex',height:4,borderRadius:2,background:'#f3f4f6',overflow:'hidden'}}>
+                              <span style={{width:`${(x?.evMin||0)/cellMax*100}%`,background:c}}/>
+                              <span style={{width:`${(x?.trMin||0)/cellMax*100}%`,background:hatch(c)}}/>
+                            </span>}
+                          </button>
+                          {open?.id===id&&(
+                            <>
+                              <div onClick={()=>setOpen(null)} style={{position:'fixed',inset:0,zIndex:40}}/>
+                              <div style={{position:'fixed',top:open.top,left:open.left,zIndex:41,width:270,maxHeight:`calc(100vh - ${open.top+8}px)`,overflowY:'auto',boxSizing:'border-box',background:'#fff',border:'1px solid var(--border)',borderRadius:10,boxShadow:'0 12px 32px rgba(17,24,39,0.14)',padding:'12px 14px',fontSize:13,display:'flex',flexDirection:'column',gap:6}}>
+                                <div style={{display:'flex',justifyContent:'space-between',fontWeight:600}}>
+                                  <span>{r.area?r.area.name:'No area'} · {dayDate(d).toLocaleDateString([],{weekday:'short',day:'numeric'})}</span>
+                                  <span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(sum)}</span>
+                                </div>
+                                {x?.ev.length>0&&<div style={{...head,marginTop:4}}>Events</div>}
+                                {x?.ev.map(e=>(
+                                  <div key={e.id} style={{display:'flex',gap:8}}>
+                                    <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.title} <span style={{color:'var(--text-muted)'}}>{hhmm(new Date(e.start_time))}–{hhmm(new Date(e.end_time))}</span></span>
+                                    <span style={{fontFamily:'var(--font-mono)'}}>{fmtMins((new Date(e.end_time)-new Date(e.start_time))/60000)}</span>
+                                  </div>
+                                ))}
+                                {x?.tr.length>0&&<div style={{...head,marginTop:4}}>Traces</div>}
+                                {x?.tr.map(t=>(
+                                  <div key={t.id} style={{display:'flex',gap:8}}>
+                                    <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:t.note?'var(--text)':'#9ca3af'}}>{t.note||'no note'}</span>
+                                    <span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(t.minutes)}</span>
+                                  </div>
+                                ))}
+                                <div style={{display:'flex',gap:6,paddingTop:8,marginTop:2,borderTop:'1px solid #f3f4f6'}}>
+                                  {[5,15,30].map(n=>(
+                                    <button key={n} type="button" aria-label={`Add ${n} minutes`} onClick={()=>addTrace({ category_id:r.area?.id||null, day:d, minutes:n, note:'' })} style={{...plusBtn,height:36}}>+{n}</button>
+                                  ))}
+                                </div>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <div style={{padding:'0 14px',display:'flex',flexDirection:'column',justifyContent:'center',alignItems:'flex-end',gap:5}}>
+                      <div style={{fontFamily:'var(--font-mono)',fontSize:13,fontWeight:600}}>{fmtMins(r.ev+r.tr)}{r.tgt>0&&<span style={{color:'#9ca3af',fontWeight:400}}> / {fmtMins(r.tgt)}</span>}</div>
+                      <div style={{width:100,display:'flex',height:4,borderRadius:2,background:'#f3f4f6',overflow:'hidden'}}>
+                        <div style={{width:`${r.ev/scale*100}%`,background:c}}/>
+                        <div style={{width:`${r.tr/scale*100}%`,background:hatch(c)}}/>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {rows.length>0&&(
+                <div style={{display:'grid',gridTemplateColumns:cols,minHeight:44,alignItems:'center',fontFamily:'var(--font-mono)',fontSize:13,fontWeight:600}}>
+                  <div style={{...head,padding:'0 14px',fontFamily:'inherit'}}>Day total</div>
+                  {days.map(d=><div key={d} style={{textAlign:'center',color:d===today?'var(--accent)':'var(--text)'}}>{d>today?'':fmtMins(dayTotals[d]||0)}</div>)}
+                  <div style={{padding:'0 14px',textAlign:'right'}}>{fmtMins(grand)}</div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       );
     }
@@ -2320,7 +2555,11 @@
     function Main({ user, onLogout }) {
       const [workspace,setWorkspace]=React.useState('calendar');
       const [logDay,setLogDay]=React.useState(null); // a day the Log view should open on
-      const nav={ workspace, setWorkspace, logDay, openLog:day=>{ setLogDay(day); setWorkspace('log'); } };
+      const nav={
+        workspace, logDay,
+        setWorkspace:w=>{ setLogDay(null); setWorkspace(w); },
+        openLog:day=>{ setLogDay(day); setWorkspace('log'); },
+      };
       if(workspace==='log')   return <LogView user={user} onLogout={onLogout} nav={nav}/>;
       if(workspace==='areas') return <AreasView user={user} onLogout={onLogout} nav={nav}/>;
       return <CalendarApp user={user} onLogout={onLogout} nav={nav}/>;
