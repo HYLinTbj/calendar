@@ -201,9 +201,10 @@
       );
     }
 
-    // <option>s for an Area <select>, in <optgroup>s per category group.
+    // <option>s for an Area <select>, in <optgroup>s per category group. The code
+    // is left out where it is the whole name, as derived for short CJK names (法文).
     function areaOptions(categories=[], groups=[]) {
-      const label=c=>c.code?`${c.code} · ${c.name}`:c.name;
+      const label=c=>c.code&&c.code!==c.name.trim().toUpperCase()?`${c.code} · ${c.name}`:c.name;
       return groupAreas(categories, groups).filter(s=>s.areas.length).map(s=>{
         const opts=s.areas.map(c=><option key={c.id} value={c.id}>{label(c)}</option>);
         return groups.length
