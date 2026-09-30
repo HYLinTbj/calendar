@@ -538,8 +538,8 @@ func (h *EventHandler) DeleteRecurrence(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// Stats handles GET /events/stats?from=&to= — time spent per Area (category),
-// derived from categorized events. Defaults to the trailing 7 days when a bound
+// Stats handles GET /events/stats?from=&to=&tz= — time spent per Area (category),
+// from categorized events and traces. Defaults to the trailing 7 days when a bound
 // is omitted. For an "elapsed so far" view the caller passes to=now so future
 // planned events don't count.
 func (h *EventHandler) Stats(c *gin.Context) {
@@ -558,7 +558,15 @@ func (h *EventHandler) Stats(c *gin.Context) {
 		fromVal = *from
 	}
 
-	stats, err := h.repo.Stats(c.Request.Context(), ownerID, fromVal, toVal)
+	// Traces are counted by the day they're on, so the caller's time zone decides
+	// which days fall in the window.
+	tz := c.DefaultQuery("tz", "UTC")
+	if _, err := time.LoadLocation(tz); err != nil || tz == "" || tz == "Local" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid 'tz', use an IANA time zone name"})
+		return
+	}
+
+	stats, err := h.repo.Stats(c.Request.Context(), ownerID, fromVal, toVal, tz)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

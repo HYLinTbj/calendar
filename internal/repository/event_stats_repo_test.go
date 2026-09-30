@@ -71,7 +71,7 @@ func TestEventStats_AggregatesByAreaAndTitle(t *testing.T) {
 
 	from := time.Date(2024, 6, 10, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2024, 6, 17, 0, 0, 0, 0, time.UTC)
-	stats, err := eventRepo.Stats(ctx, user.ID, from, to)
+	stats, err := eventRepo.Stats(ctx, user.ID, from, to, "UTC")
 	require.NoError(t, err)
 
 	require.Len(t, stats.Areas, 3) // French, Gym, Uncategorized
@@ -117,7 +117,7 @@ func TestEventStats_ScopedToOwner(t *testing.T) {
 
 	from := time.Date(2024, 6, 10, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2024, 6, 17, 0, 0, 0, 0, time.UTC)
-	stats, err := eventRepo.Stats(ctx, owner.ID, from, to)
+	stats, err := eventRepo.Stats(ctx, owner.ID, from, to, "UTC")
 	require.NoError(t, err)
 
 	total := 0

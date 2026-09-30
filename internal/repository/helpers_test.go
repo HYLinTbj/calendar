@@ -18,7 +18,7 @@ import (
 func truncateAll(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `
-		TRUNCATE tasks, event_invitations, calendar_shares, events,
+		TRUNCATE time_traces, tasks, event_invitations, calendar_shares, events,
 		         recurring_events, categories, category_groups, calendars, users, maintenance_runs RESTART IDENTITY
 	`)
 	require.NoError(t, err)

@@ -429,40 +429,19 @@ func (r *EventRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) err
 	return nil
 }
 
-// Stats aggregates time spent over [from, to), grouped by Area (category) and
-// then by sub-activity (event title) within each Area. Duration comes from the
-// event's own span (end_time - start_time). All-day events are excluded — they
-// carry no meaningful duration. Events with no category (NULL, or a since-deleted
-// one) collect under a single "Uncategorized" entry.
-func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to time.Time) (*model.TimeStats, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT e.category_id, COALESCE(c.name, ''), COALESCE(c.code, ''), COALESCE(c.color, ''),
-		       COALESCE(c.weekly_target_minutes, 0),
-		       c.group_id, COALESCE(g.name, ''), COALESCE(g.color, ''), e.title,
-		       SUM(EXTRACT(EPOCH FROM (e.end_time - e.start_time)) / 60)::int
-		FROM events e
-		LEFT JOIN categories c ON c.id = e.category_id
-		LEFT JOIN category_groups g ON g.id = c.group_id
-		WHERE e.owner_id = $1 AND e.all_day = false
-		  AND e.start_time >= $2 AND e.start_time < $3
-		GROUP BY e.category_id, c.name, c.code, c.color, c.weekly_target_minutes,
-		         c.group_id, g.name, g.color, e.title
-		ORDER BY c.name NULLS LAST, e.title`,
-		ownerID, from, to)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+// Stats aggregates time spent over [from, to), grouped by Area (category): minutes
+// of events starting in the window (each one's end_time - start_time; all-day events
+// are excluded, they carry no meaningful duration), broken down by sub-activity
+// (event title), plus traces whose day starts (at local midnight in tz, an IANA zone
+// name) in it. Time with no category (NULL, or a since-deleted one) collects under a
+// single "Uncategorized" entry. Traces have no clock time, so a day's traces count
+// in whichever window holds its start; "[week start, now)" then includes today's
+// and "[now, week end)" doesn't, so the two never count them twice.
+func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to time.Time, tz string) (*model.TimeStats, error) {
 	stats := &model.TimeStats{From: from, To: to, Areas: []model.AreaStat{}}
-	pos := map[string]int{} // group key -> index into stats.Areas
-	for rows.Next() {
-		var areaID, groupID *uuid.UUID
-		var name, code, color, groupName, groupColor, sub string
-		var target, minutes int
-		if err := rows.Scan(&areaID, &name, &code, &color, &target, &groupID, &groupName, &groupColor, &sub, &minutes); err != nil {
-			return nil, err
-		}
+	pos := map[string]int{} // area key -> index into stats.Areas
+	// area returns the stats entry for an Area, adding it on first sight.
+	area := func(areaID, groupID *uuid.UUID, name, code, color string, target int, groupName, groupColor string) *model.AreaStat {
 		key := "none"
 		if areaID != nil {
 			key = areaID.String()
@@ -486,13 +465,78 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 			i = len(stats.Areas) - 1
 			pos[key] = i
 		}
-		entry := &stats.Areas[i]
+		return &stats.Areas[i]
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT e.category_id, COALESCE(c.name, ''), COALESCE(c.code, ''), COALESCE(c.color, ''),
+		       COALESCE(c.weekly_target_minutes, 0),
+		       c.group_id, COALESCE(g.name, ''), COALESCE(g.color, ''), e.title,
+		       SUM(EXTRACT(EPOCH FROM (e.end_time - e.start_time)) / 60)::int
+		FROM events e
+		LEFT JOIN categories c ON c.id = e.category_id
+		LEFT JOIN category_groups g ON g.id = c.group_id
+		WHERE e.owner_id = $1 AND e.all_day = false
+		  AND e.start_time >= $2 AND e.start_time < $3
+		GROUP BY e.category_id, c.name, c.code, c.color, c.weekly_target_minutes,
+		         c.group_id, g.name, g.color, e.title
+		ORDER BY c.name NULLS LAST, e.title`,
+		ownerID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var areaID, groupID *uuid.UUID
+		var name, code, color, groupName, groupColor, sub string
+		var target, minutes int
+		if err := rows.Scan(&areaID, &name, &code, &color, &target, &groupID, &groupName, &groupColor, &sub, &minutes); err != nil {
+			return nil, err
+		}
+		entry := area(areaID, groupID, name, code, color, target, groupName, groupColor)
+		entry.EventMinutes += minutes
 		entry.TotalMinutes += minutes
 		if sub != "" {
 			entry.SubActivities = append(entry.SubActivities, model.SubActivityStat{Name: sub, Minutes: minutes})
 		}
 	}
-	return stats, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// A trace's note is not a sub-activity: notes are free text, so they'd only
+	// split the per-title breakdown into one-off rows.
+	trows, err := r.pool.Query(ctx, `
+		SELECT t.category_id, COALESCE(c.name, ''), COALESCE(c.code, ''), COALESCE(c.color, ''),
+		       COALESCE(c.weekly_target_minutes, 0),
+		       c.group_id, COALESCE(g.name, ''), COALESCE(g.color, ''),
+		       SUM(t.minutes)::int
+		FROM time_traces t
+		LEFT JOIN categories c ON c.id = t.category_id
+		LEFT JOIN category_groups g ON g.id = c.group_id
+		WHERE t.owner_id = $1
+		  AND (t.day::timestamp AT TIME ZONE $4) >= $2
+		  AND (t.day::timestamp AT TIME ZONE $4) < $3
+		GROUP BY t.category_id, c.name, c.code, c.color, c.weekly_target_minutes,
+		         c.group_id, g.name, g.color
+		ORDER BY c.name NULLS LAST`,
+		ownerID, from, to, tz)
+	if err != nil {
+		return nil, err
+	}
+	defer trows.Close()
+	for trows.Next() {
+		var areaID, groupID *uuid.UUID
+		var name, code, color, groupName, groupColor string
+		var target, minutes int
+		if err := trows.Scan(&areaID, &name, &code, &color, &target, &groupID, &groupName, &groupColor, &minutes); err != nil {
+			return nil, err
+		}
+		entry := area(areaID, groupID, name, code, color, target, groupName, groupColor)
+		entry.TraceMinutes += minutes
+		entry.TotalMinutes += minutes
+	}
+	return stats, trows.Err()
 }
 
 func itoa(i int) string {

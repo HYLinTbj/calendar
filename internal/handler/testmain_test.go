@@ -99,6 +99,7 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 	categoryHandler := handler.NewCategoryHandler(categoryRepo, categoryGroupRepo)
 	categoryGroupHandler := handler.NewCategoryGroupHandler(categoryGroupRepo)
 	taskHandler := handler.NewTaskHandler(repository.NewTaskRepository(pool), categoryRepo)
+	traceHandler := handler.NewTraceHandler(repository.NewTraceRepository(pool), categoryRepo)
 	icsHandler := handler.NewICSHandler(calRepo, eventRepo, recurringRepo, inviteRepo)
 	freeBusyHandler := handler.NewFreeBusyHandler(eventRepo, userRepo)
 
@@ -184,6 +185,15 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 			tasks.GET("/:id", taskHandler.GetByID)
 			tasks.PUT("/:id", taskHandler.Update)
 			tasks.DELETE("/:id", taskHandler.Delete)
+		}
+
+		traces := protected.Group("/traces")
+		{
+			traces.POST("", traceHandler.Create)
+			traces.GET("", traceHandler.List)
+			traces.GET("/:id", traceHandler.GetByID)
+			traces.PUT("/:id", traceHandler.Update)
+			traces.DELETE("/:id", traceHandler.Delete)
 		}
 	}
 

@@ -82,9 +82,27 @@ Schema lives **inline in `internal/db/db.go`'s `Migrate()`** as one idempotent S
 - **Recurring events**: the `events` table holds *materialized* instances; the scheduler extends the window. Recurrence edits and deletes take a `scope` of `this` | `this_and_following` | `all` (`PUT` / `DELETE /events/:id/recurrence`), handled in `handler/event.go` + `repository/recurring_event.go`. Scopes `all` and `this_and_following` apply only the fields that differ from the occurrence edited (past occurrences keep details later series edits changed). `Update` and `TruncateAt` run in one transaction holding the series' row. A weekly series every 2+ weeks groups its days by `week_start` (the UI sends Sunday; unset is Monday, as in RFC 5545); moving its days moves the week start along.
   - **Exceptions**: any edit of a single instance (`EventRepository.Update`, which covers scope `this`, drag and the Log view) detaches it into a standalone event. Deleting one (`EventRepository.Delete`) removes it. Both append the instance's start time to `recurring_events.exdates`. An edited instance stays part of its series, as in Google Calendar and Outlook: the API returns its `detached_from`, the UI keeps its ↻ marker, and deleting the series (or this-and-following) deletes it. `DELETE /events/:id/recurrence` accepts it too, counting this-and-following from `original_start`; edits apply to it alone. Generation skips exdates but still counts them toward `max_occurrences`. So a *linked* instance's `start_time` is always its original occurrence time. Series-wide regeneration (`Update` / `SplitAt` delete linked future rows and regenerate; `Update` edits them in place when no occurrence moves) relies on this. Keep it true, and shift or carry exdates whenever you move a series' anchor. Data from before this rule (instances edited in place while still linked, recognisable by `updated_at > created_at`; occurrences deleted without an exdate) is fixed once, at the first api startup, by `RecurringEventRepository.RepairLegacyExceptions` (recorded in `maintenance_runs`).
 
-### Time tracking = categorized events (no separate table)
+### Time tracking = categorized events + traces
 
-Time tracking is **unified into calendar events** — there is intentionally no `time_logs` table. A categorized, non-all-day event *is* a logged session: duration = `end_time − start_time`, area = its `category_id`, sub-activity = its `title`. Categories double as "Areas" (they carry `weekly_target_minutes`). Areas can optionally belong to a **category group** (`category_groups`, `/category-groups`; e.g. "Language learning" holding French and Japanese) — the group carries the shared colour, deleting it leaves its areas ungrouped — and each area has a short per-owner `code` badge ("FR"), derived from the name when not supplied (`model.DeriveCategoryCode`). `GET /events/stats?from=&to=` (`EventRepository.Stats`) rolls minutes up per area (with its group fields) and per title, excluding all-day events; query `to=<now>` to count only elapsed time. **Tasks** (`internal/{model,repository,handler}/task.go`) are a separate lightweight backlog entity. Don't reintroduce a parallel time-log entity.
+Tracked time comes from two sources:
+
+- **Sessions:** a categorized, non-all-day event is a session at a real time. Its duration is `end_time − start_time`, its area is its `category_id`, and its sub-activity is its `title`.
+- **Traces:** `time_traces` (`internal/{model,repository,handler}/trace.go`, `/traces`) record short stretches with **no clock time**: a `day` (`model.Date`, "YYYY-MM-DD"), `minutes`, an area and a note. They never render on the calendar grid, only as a strip under the day headers.
+- **The timer:** a stopped timer under 15 min (`TRACE_CUTOFF_MIN` in `Calendar.html`) becomes a trace. Longer ones become an event.
+
+Areas and codes:
+
+- Categories double as "Areas" (they carry `weekly_target_minutes`).
+- Areas can optionally belong to a **category group** (`category_groups`, `/category-groups`; e.g. "Language learning" holding French and Japanese). The group carries the shared colour, and deleting it leaves its areas ungrouped.
+- Each area has a short per-owner `code` badge ("FR"), derived from the name when not supplied (`model.DeriveCategoryCode`).
+
+Stats: `GET /events/stats?from=&to=&tz=` (`EventRepository.Stats`) rolls minutes up per area, with its group fields, as `event_minutes` + `trace_minutes` = `total_minutes`.
+
+- Only events have a per-title breakdown. All-day events are excluded.
+- A trace counts in the window that holds the local midnight (in `tz`) starting its day.
+- Query `to=<now>` to count only elapsed time.
+
+**Tasks** (`internal/{model,repository,handler}/task.go`) are a separate lightweight backlog entity. Keep short, clock-less time in traces, not in fake events.
 
 ### Adding a persisted entity (touches several files)
 
