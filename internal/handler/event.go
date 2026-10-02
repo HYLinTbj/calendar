@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -559,15 +560,74 @@ func (h *EventHandler) Stats(c *gin.Context) {
 		fromVal = *from
 	}
 
-	// Traces are counted by the day they're on, so the caller's time zone decides
-	// which days fall in the window.
-	tz := c.DefaultQuery("tz", "UTC")
-	if _, err := time.LoadLocation(tz); err != nil || tz == "" || tz == "Local" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid 'tz', use an IANA time zone name"})
+	tz, ok := statsTZ(c)
+	if !ok {
 		return
 	}
 
 	stats, err := h.repo.Stats(c.Request.Context(), ownerID, fromVal, toVal, tz)
+	respondStats(c, stats, err)
+}
+
+// maxWeeklyStatsDays bounds WeeklyStats' range: 53 weeks.
+const maxWeeklyStatsDays = 53 * 7
+
+// WeeklyStats is Stats split into weeks: GET /events/stats/weekly?from=&to=&tz=&week_start=
+// gives each Area's minutes per week (of local days in tz, starting on week_start,
+// Sun=0 … Sat=6, default Monday) over [from, to). to defaults to now, from to 8 weeks
+// before to.
+func (h *EventHandler) WeeklyStats(c *gin.Context) {
+	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
+
+	from, to, ok := parseRange(c)
+	if !ok {
+		return
+	}
+	toVal := time.Now()
+	if to != nil {
+		toVal = *to
+	}
+	fromVal := toVal.AddDate(0, 0, -7*8)
+	if from != nil {
+		fromVal = *from
+	}
+	if !fromVal.Before(toVal) || toVal.Sub(fromVal) > maxWeeklyStatsDays*24*time.Hour {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' must be before 'to', at most 53 weeks apart"})
+		return
+	}
+	tz, ok := statsTZ(c)
+	if !ok {
+		return
+	}
+	weekStart := 1
+	if v := c.Query("week_start"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 6 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid 'week_start', use 0 (Sunday) to 6 (Saturday)"})
+			return
+		}
+		weekStart = n
+	}
+
+	stats, err := h.repo.WeeklyStats(c.Request.Context(), ownerID, fromVal, toVal, tz, weekStart)
+	respondStats(c, stats, err)
+}
+
+// statsTZ reads the stats' optional "tz" query param (an IANA zone name, default
+// UTC). Traces are counted by the day they're on, so the caller's time zone decides
+// which days fall in a window. Returns false (after writing a 400) when it's invalid.
+func statsTZ(c *gin.Context) (string, bool) {
+	tz := c.DefaultQuery("tz", "UTC")
+	if _, err := time.LoadLocation(tz); err != nil || tz == "" || tz == "Local" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid 'tz', use an IANA time zone name"})
+		return "", false
+	}
+	return tz, true
+}
+
+// respondStats writes stats, or the error that came instead: a 400 for a time zone
+// Postgres doesn't know, though Go's tz database does.
+func respondStats(c *gin.Context, stats any, err error) {
 	if errors.Is(err, repository.ErrInvalidTimeZone) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid 'tz', use an IANA time zone name"})
 		return

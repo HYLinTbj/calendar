@@ -144,6 +144,7 @@ func buildRouter(pool *pgxpool.Pool, rdb *redis.Client) *gin.Engine {
 			events.GET("", eventHandler.List)
 			events.GET("/search", eventHandler.Search)
 			events.GET("/stats", eventHandler.Stats)
+			events.GET("/stats/weekly", eventHandler.WeeklyStats)
 			events.GET("/:id", eventHandler.GetByID)
 			events.PUT("/:id", eventHandler.Update)
 			events.PUT("/:id/recurrence", eventHandler.UpdateRecurrence)

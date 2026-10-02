@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -432,6 +433,67 @@ func (r *EventRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) err
 	return nil
 }
 
+// statsAreaCols are the columns, after a row's category_id, that scanStatsRow reads
+// into a model.AreaInfo, from the row's category joined as c and its group as g
+// (statsAreaJoin). statsAreaGroupBy groups by them.
+const statsAreaCols = `COALESCE(c.name, ''), COALESCE(c.code, ''), COALESCE(c.color, ''),
+		       COALESCE(c.weekly_target_minutes, 0), c.group_id, COALESCE(g.name, ''), COALESCE(g.color, '')`
+
+const statsAreaGroupBy = `c.name, c.code, c.color, c.weekly_target_minutes, c.group_id, g.name, g.color`
+
+// statsAreaJoin joins the category (c) and category group (g) of the rows aliased t.
+func statsAreaJoin(t string) string {
+	return `LEFT JOIN categories c ON c.id = ` + t + `.category_id
+		LEFT JOIN category_groups g ON g.id = c.group_id`
+}
+
+// statsTraceWindow keeps the traces t (of owner $1) whose day starts, at local
+// midnight in tz $4, within [$2, $3).
+const statsTraceWindow = `t.owner_id = $1
+		  -- The local days holding from and to: a bound the (owner_id, day) index can use.
+		  AND t.day >= ($2::timestamptz AT TIME ZONE $4)::date
+		  AND t.day <= ($3::timestamptz AT TIME ZONE $4)::date
+		  AND (t.day::timestamp AT TIME ZONE $4) >= $2
+		  AND (t.day::timestamp AT TIME ZONE $4) < $3`
+
+// statsEventMinutes is the minutes of a stats group of events e, rounded per group.
+const statsEventMinutes = `SUM(EXTRACT(EPOCH FROM (e.end_time - e.start_time)) / 60)::int`
+
+// scanStatsRow scans a row's category_id and statsAreaCols, then extra.
+func scanStatsRow(rows pgx.Rows, extra ...any) (model.AreaInfo, error) {
+	var a model.AreaInfo
+	dest := append([]any{&a.AreaID, &a.AreaName, &a.AreaCode, &a.AreaColor,
+		&a.WeeklyTargetMinutes, &a.GroupID, &a.GroupName, &a.GroupColor}, extra...)
+	if err := rows.Scan(dest...); err != nil {
+		return a, err
+	}
+	if a.AreaID == nil {
+		a.AreaName = "Uncategorized"
+	}
+	return a, nil
+}
+
+// areaKey keys stats entries by Area: time with no Area shares one entry.
+func areaKey(id *uuid.UUID) string {
+	if id == nil {
+		return "none"
+	}
+	return id.String()
+}
+
+// compareAreas orders stats entries by name, with Uncategorized last. Each query
+// gives that order on its own, but an Area seen only among traces would otherwise
+// come after Uncategorized.
+func compareAreas(a, b model.AreaInfo) int {
+	if (a.AreaID == nil) != (b.AreaID == nil) {
+		if a.AreaID == nil {
+			return 1
+		}
+		return -1
+	}
+	return strings.Compare(strings.ToLower(a.AreaName), strings.ToLower(b.AreaName))
+}
+
 // Stats aggregates time spent over [from, to), grouped by Area (category): minutes
 // of events starting in the window (each one's end_time - start_time; all-day events
 // are excluded, they carry no meaningful duration), broken down by sub-activity
@@ -442,47 +504,25 @@ func (r *EventRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) err
 // and "[now, week end)" doesn't, so the two never count them twice.
 func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to time.Time, tz string) (*model.TimeStats, error) {
 	stats := &model.TimeStats{From: from, To: to, Areas: []model.AreaStat{}}
-	pos := map[string]int{} // area key -> index into stats.Areas
-	// area returns the stats entry for an Area, adding it on first sight.
-	area := func(areaID, groupID *uuid.UUID, name, code, color string, target int, groupName, groupColor string) *model.AreaStat {
-		key := "none"
-		if areaID != nil {
-			key = areaID.String()
-		}
-		i, ok := pos[key]
+	pos := map[string]int{} // areaKey -> index into stats.Areas
+	// entry returns the stats entry for an Area, adding it on first sight.
+	entry := func(info model.AreaInfo) *model.AreaStat {
+		i, ok := pos[areaKey(info.AreaID)]
 		if !ok {
-			if areaID == nil {
-				name = "Uncategorized"
-			}
-			stats.Areas = append(stats.Areas, model.AreaStat{
-				AreaID:              areaID,
-				AreaName:            name,
-				AreaCode:            code,
-				AreaColor:           color,
-				GroupID:             groupID,
-				GroupName:           groupName,
-				GroupColor:          groupColor,
-				WeeklyTargetMinutes: target,
-				SubActivities:       []model.SubActivityStat{},
-			})
+			stats.Areas = append(stats.Areas, model.AreaStat{AreaInfo: info, SubActivities: []model.SubActivityStat{}})
 			i = len(stats.Areas) - 1
-			pos[key] = i
+			pos[areaKey(info.AreaID)] = i
 		}
 		return &stats.Areas[i]
 	}
 
 	rows, err := r.pool.Query(ctx, `
-		SELECT e.category_id, COALESCE(c.name, ''), COALESCE(c.code, ''), COALESCE(c.color, ''),
-		       COALESCE(c.weekly_target_minutes, 0),
-		       c.group_id, COALESCE(g.name, ''), COALESCE(g.color, ''), e.title,
-		       SUM(EXTRACT(EPOCH FROM (e.end_time - e.start_time)) / 60)::int
+		SELECT e.category_id, `+statsAreaCols+`, e.title, `+statsEventMinutes+`
 		FROM events e
-		LEFT JOIN categories c ON c.id = e.category_id
-		LEFT JOIN category_groups g ON g.id = c.group_id
+		`+statsAreaJoin("e")+`
 		WHERE e.owner_id = $1 AND e.all_day = false
 		  AND e.start_time >= $2 AND e.start_time < $3
-		GROUP BY e.category_id, c.name, c.code, c.color, c.weekly_target_minutes,
-		         c.group_id, g.name, g.color, e.title
+		GROUP BY e.category_id, `+statsAreaGroupBy+`, e.title
 		ORDER BY c.name NULLS LAST, e.title`,
 		ownerID, from, to)
 	if err != nil {
@@ -490,17 +530,17 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var areaID, groupID *uuid.UUID
-		var name, code, color, groupName, groupColor, sub string
-		var target, minutes int
-		if err := rows.Scan(&areaID, &name, &code, &color, &target, &groupID, &groupName, &groupColor, &sub, &minutes); err != nil {
+		var sub string
+		var minutes int
+		info, err := scanStatsRow(rows, &sub, &minutes)
+		if err != nil {
 			return nil, err
 		}
-		entry := area(areaID, groupID, name, code, color, target, groupName, groupColor)
-		entry.EventMinutes += minutes
-		entry.TotalMinutes += minutes
+		e := entry(info)
+		e.EventMinutes += minutes
+		e.TotalMinutes += minutes
 		if sub != "" {
-			entry.SubActivities = append(entry.SubActivities, model.SubActivityStat{Name: sub, Minutes: minutes})
+			e.SubActivities = append(e.SubActivities, model.SubActivityStat{Name: sub, Minutes: minutes})
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -510,56 +550,145 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 	// A trace's note is not a sub-activity: notes are free text, so they'd only
 	// split the per-title breakdown into one-off rows.
 	trows, err := r.pool.Query(ctx, `
-		SELECT t.category_id, COALESCE(c.name, ''), COALESCE(c.code, ''), COALESCE(c.color, ''),
-		       COALESCE(c.weekly_target_minutes, 0),
-		       c.group_id, COALESCE(g.name, ''), COALESCE(g.color, ''),
-		       SUM(t.minutes)::int
+		SELECT t.category_id, `+statsAreaCols+`, SUM(t.minutes)::int
 		FROM time_traces t
-		LEFT JOIN categories c ON c.id = t.category_id
-		LEFT JOIN category_groups g ON g.id = c.group_id
-		WHERE t.owner_id = $1
-		  -- The local days holding from and to: a bound the (owner_id, day) index can use.
-		  AND t.day >= ($2::timestamptz AT TIME ZONE $4)::date
-		  AND t.day <= ($3::timestamptz AT TIME ZONE $4)::date
-		  AND (t.day::timestamp AT TIME ZONE $4) >= $2
-		  AND (t.day::timestamp AT TIME ZONE $4) < $3
-		GROUP BY t.category_id, c.name, c.code, c.color, c.weekly_target_minutes,
-		         c.group_id, g.name, g.color
-		ORDER BY c.name NULLS LAST`,
+		`+statsAreaJoin("t")+`
+		WHERE `+statsTraceWindow+`
+		GROUP BY t.category_id, `+statsAreaGroupBy,
 		ownerID, from, to, tz)
 	if err != nil {
 		return nil, tzErr(err)
 	}
 	defer trows.Close()
 	for trows.Next() {
-		var areaID, groupID *uuid.UUID
-		var name, code, color, groupName, groupColor string
-		var target, minutes int
-		if err := trows.Scan(&areaID, &name, &code, &color, &target, &groupID, &groupName, &groupColor, &minutes); err != nil {
+		var minutes int
+		info, err := scanStatsRow(trows, &minutes)
+		if err != nil {
 			return nil, err
 		}
-		entry := area(areaID, groupID, name, code, color, target, groupName, groupColor)
-		entry.TraceMinutes += minutes
-		entry.TotalMinutes += minutes
+		e := entry(info)
+		e.TraceMinutes += minutes
+		e.TotalMinutes += minutes
 	}
 	if err := trows.Err(); err != nil {
 		return nil, tzErr(err)
 	}
-	// Name order with Uncategorized last, as each query gives on its own: an Area
-	// seen only among traces would otherwise come after Uncategorized.
-	slices.SortStableFunc(stats.Areas, func(a, b model.AreaStat) int {
-		if (a.AreaID == nil) != (b.AreaID == nil) {
-			if a.AreaID == nil {
-				return 1
-			}
-			return -1
-		}
-		return strings.Compare(strings.ToLower(a.AreaName), strings.ToLower(b.AreaName))
-	})
+	slices.SortStableFunc(stats.Areas, func(a, b model.AreaStat) int { return compareAreas(a.AreaInfo, b.AreaInfo) })
 	return stats, nil
 }
 
-// ErrInvalidTimeZone is returned by Stats when Postgres doesn't know its tz,
+// weekOf is the SQL for the first day of the week holding date d, for weeks
+// starting on weekday ws (Sun=0 … Sat=6).
+func weekOf(d, ws string) string {
+	return `(` + d + ` - ((EXTRACT(DOW FROM ` + d + `)::int - ` + ws + ` + 7) % 7))`
+}
+
+// WeeklyStats splits Stats into weeks: each Area's total minutes over [from, to)
+// per week of local days in tz, the weeks starting on weekday weekStart (Sun=0 …
+// Sat=6). An event counts in the week its start falls in, a trace in the week
+// holding its day, and event minutes are rounded per title as Stats rounds them, so
+// a week's minutes are what Stats gives over the same span. The first and last
+// weeks are partial when from and to aren't week boundaries.
+func (r *EventRepository) WeeklyStats(ctx context.Context, ownerID uuid.UUID, from, to time.Time, tz string, weekStart int) (*model.WeeklyStats, error) {
+	stats := &model.WeeklyStats{From: from, To: to, TZ: tz, WeekStart: weekStart, Weeks: []model.Date{}, Areas: []model.AreaWeekly{}}
+	if !from.Before(to) {
+		return stats, nil
+	}
+
+	// The weeks holding the range's first and last instants, in Postgres' own zone
+	// rules: the same ones that bucket the rows below.
+	var first, last time.Time
+	if err := r.pool.QueryRow(ctx,
+		`SELECT `+weekOf(`($1::timestamptz AT TIME ZONE $3)::date`, `$4::int`)+`,
+		        `+weekOf(`(($2::timestamptz - interval '1 microsecond') AT TIME ZONE $3)::date`, `$4::int`),
+		from, to, tz, weekStart,
+	).Scan(&first, &last); err != nil {
+		return nil, tzErr(err)
+	}
+	week := map[string]int{} // week's first day -> index into stats.Weeks
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 7) {
+		day := d.Format(time.DateOnly)
+		week[day] = len(stats.Weeks)
+		stats.Weeks = append(stats.Weeks, model.Date(day))
+	}
+
+	pos := map[string]int{} // areaKey -> index into stats.Areas
+	// add counts minutes for an Area in the week starting on day.
+	add := func(info model.AreaInfo, day time.Time, minutes int) error {
+		w, ok := week[day.Format(time.DateOnly)]
+		if !ok {
+			return fmt.Errorf("week %s is outside %s – %s", day.Format(time.DateOnly), first.Format(time.DateOnly), last.Format(time.DateOnly))
+		}
+		i, ok := pos[areaKey(info.AreaID)]
+		if !ok {
+			stats.Areas = append(stats.Areas, model.AreaWeekly{AreaInfo: info, Minutes: make([]int, len(stats.Weeks))})
+			i = len(stats.Areas) - 1
+			pos[areaKey(info.AreaID)] = i
+		}
+		stats.Areas[i].Minutes[w] += minutes
+		return nil
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT e.category_id, `+statsAreaCols+`,
+		       `+weekOf(`(e.start_time AT TIME ZONE $4)::date`, `$5::int`)+` AS week,
+		       `+statsEventMinutes+`
+		FROM events e
+		`+statsAreaJoin("e")+`
+		WHERE e.owner_id = $1 AND e.all_day = false
+		  AND e.start_time >= $2 AND e.start_time < $3
+		GROUP BY e.category_id, `+statsAreaGroupBy+`, week, e.title`,
+		ownerID, from, to, tz, weekStart)
+	if err != nil {
+		return nil, tzErr(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var day time.Time
+		var minutes int
+		info, err := scanStatsRow(rows, &day, &minutes)
+		if err != nil {
+			return nil, err
+		}
+		if err := add(info, day, minutes); err != nil {
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, tzErr(err)
+	}
+
+	trows, err := r.pool.Query(ctx, `
+		SELECT t.category_id, `+statsAreaCols+`,
+		       `+weekOf(`t.day`, `$5::int`)+` AS week, SUM(t.minutes)::int
+		FROM time_traces t
+		`+statsAreaJoin("t")+`
+		WHERE `+statsTraceWindow+`
+		GROUP BY t.category_id, `+statsAreaGroupBy+`, week`,
+		ownerID, from, to, tz, weekStart)
+	if err != nil {
+		return nil, tzErr(err)
+	}
+	defer trows.Close()
+	for trows.Next() {
+		var day time.Time
+		var minutes int
+		info, err := scanStatsRow(trows, &day, &minutes)
+		if err != nil {
+			return nil, err
+		}
+		if err := add(info, day, minutes); err != nil {
+			return nil, err
+		}
+	}
+	if err := trows.Err(); err != nil {
+		return nil, tzErr(err)
+	}
+	slices.SortStableFunc(stats.Areas, func(a, b model.AreaWeekly) int { return compareAreas(a.AreaInfo, b.AreaInfo) })
+	return stats, nil
+}
+
+// ErrInvalidTimeZone is returned by Stats and WeeklyStats when Postgres doesn't know their tz,
 // which can happen for a name Go's own tz database accepts.
 var ErrInvalidTimeZone = errors.New("invalid time zone")
 
