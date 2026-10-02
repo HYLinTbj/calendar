@@ -207,6 +207,21 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 		CREATE INDEX IF NOT EXISTS tasks_owner_area_idx ON tasks (owner_id, area_id);
 
+		-- Traces: short stretches of time with no clock time (minutes on an Area on
+		-- some day). They count toward Area totals but never show on the calendar grid.
+		CREATE TABLE IF NOT EXISTS time_traces (
+			id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+			owner_id    UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			category_id UUID        REFERENCES categories(id) ON DELETE SET NULL,
+			day         DATE        NOT NULL,
+			minutes     INT         NOT NULL CHECK (minutes BETWEEN 1 AND 1440),
+			note        TEXT        NOT NULL DEFAULT '',
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS time_traces_owner_day_idx ON time_traces (owner_id, day);
+
 		-- Occurrence start times a series must not (re)generate: ones deleted on their own,
 		-- or edited on their own (which detaches them into standalone events). They still
 		-- count toward max_occurrences, as EXDATE does against COUNT in RFC 5545.

@@ -48,6 +48,7 @@ func main() {
 	categoryGroupRepo := repository.NewCategoryGroupRepository(pool)
 	shareRepo := repository.NewCalendarShareRepository(pool)
 	taskRepo := repository.NewTaskRepository(pool)
+	traceRepo := repository.NewTraceRepository(pool)
 	reminderQueue := queue.NewReminderQueue(rdb)
 
 	if n, err := recurringRepo.RepairLegacyExceptions(ctx); err != nil {
@@ -66,6 +67,7 @@ func main() {
 	categoryHandler := handler.NewCategoryHandler(categoryRepo, categoryGroupRepo)
 	categoryGroupHandler := handler.NewCategoryGroupHandler(categoryGroupRepo)
 	taskHandler := handler.NewTaskHandler(taskRepo, categoryRepo)
+	traceHandler := handler.NewTraceHandler(traceRepo, categoryRepo)
 	icsHandler := handler.NewICSHandler(calRepo, eventRepo, recurringRepo, inviteRepo)
 	freeBusyHandler := handler.NewFreeBusyHandler(eventRepo, userRepo)
 
@@ -155,6 +157,15 @@ func main() {
 			tasks.GET("/:id", taskHandler.GetByID)
 			tasks.PUT("/:id", taskHandler.Update)
 			tasks.DELETE("/:id", taskHandler.Delete)
+		}
+
+		traces := protected.Group("/traces")
+		{
+			traces.POST("", traceHandler.Create)
+			traces.GET("", traceHandler.List)
+			traces.GET("/:id", traceHandler.GetByID)
+			traces.PUT("/:id", traceHandler.Update)
+			traces.DELETE("/:id", traceHandler.Delete)
 		}
 	}
 

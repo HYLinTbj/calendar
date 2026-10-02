@@ -16,6 +16,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/middleware"
+	"github.com/hylin/calendar/internal/model"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +24,7 @@ import (
 func truncateAll(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(), `
-		TRUNCATE tasks, event_invitations, calendar_shares, events,
+		TRUNCATE time_traces, tasks, event_invitations, calendar_shares, events,
 		         recurring_events, categories, category_groups, calendars, users, maintenance_runs RESTART IDENTITY
 	`)
 	require.NoError(t, err)
@@ -128,4 +129,14 @@ func createCategoryGroup(t *testing.T, token, name, color string) uuid.UUID {
 	}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	return resp.ID
+}
+
+// createTrace creates a trace via the API from body and returns it.
+func createTrace(t *testing.T, token string, body map[string]any) model.Trace {
+	t.Helper()
+	w := Do(t, testRouter, "POST", "/traces", token, body)
+	require.Equal(t, http.StatusCreated, w.Code, "create trace failed: %s", w.Body.String())
+	var tr model.Trace
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&tr))
+	return tr
 }

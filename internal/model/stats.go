@@ -6,17 +6,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// TimeStats summarizes time spent per Area (category) over [From, To), derived
-// entirely from calendar events — a categorized event is a logged session, with
-// duration = end_time - start_time. JSON field names are kept stable so the
-// frontend stats panel renders the same shape regardless of the source table.
+// TimeStats summarizes time spent per Area (category) over [From, To), from two
+// sources: categorized events (sessions at a real time, duration = end_time -
+// start_time) and traces (minutes on a day, with no clock time).
 type TimeStats struct {
 	From  time.Time  `json:"from"`
 	To    time.Time  `json:"to"`
 	Areas []AreaStat `json:"areas"`
 }
 
-// AreaStat is the per-Area rollup. AreaID is nil for events without a category,
+// AreaStat is the per-Area rollup. AreaID is nil for time without a category,
 // which are grouped under a single "Uncategorized" entry. The Group* fields
 // describe the Area's category group, if any, so clients can subtotal by group.
 type AreaStat struct {
@@ -28,7 +27,9 @@ type AreaStat struct {
 	GroupName           string            `json:"group_name,omitempty"`
 	GroupColor          string            `json:"group_color,omitempty"`
 	WeeklyTargetMinutes int               `json:"weekly_target_minutes"`
-	TotalMinutes        int               `json:"total_minutes"`
+	TotalMinutes        int               `json:"total_minutes"` // EventMinutes + TraceMinutes
+	EventMinutes        int               `json:"event_minutes"`
+	TraceMinutes        int               `json:"trace_minutes"`
 	SubActivities       []SubActivityStat `json:"sub_activities"`
 }
 
