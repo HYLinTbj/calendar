@@ -333,6 +333,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 		ALTER TABLE categories ALTER COLUMN code SET NOT NULL;
 		CREATE UNIQUE INDEX IF NOT EXISTS categories_owner_code_uniq ON categories (owner_id, code);
+
+		-- Stats read one user's events by start time.
+		CREATE INDEX IF NOT EXISTS events_owner_start_idx ON events (owner_id, start_time);
 	`)
 	if err != nil {
 		return err
