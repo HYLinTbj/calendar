@@ -3,13 +3,16 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -515,6 +518,9 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 		LEFT JOIN categories c ON c.id = t.category_id
 		LEFT JOIN category_groups g ON g.id = c.group_id
 		WHERE t.owner_id = $1
+		  -- The local days holding from and to: a bound the (owner_id, day) index can use.
+		  AND t.day >= ($2::timestamptz AT TIME ZONE $4)::date
+		  AND t.day <= ($3::timestamptz AT TIME ZONE $4)::date
 		  AND (t.day::timestamp AT TIME ZONE $4) >= $2
 		  AND (t.day::timestamp AT TIME ZONE $4) < $3
 		GROUP BY t.category_id, c.name, c.code, c.color, c.weekly_target_minutes,
@@ -522,7 +528,7 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 		ORDER BY c.name NULLS LAST`,
 		ownerID, from, to, tz)
 	if err != nil {
-		return nil, err
+		return nil, tzErr(err)
 	}
 	defer trows.Close()
 	for trows.Next() {
@@ -536,7 +542,35 @@ func (r *EventRepository) Stats(ctx context.Context, ownerID uuid.UUID, from, to
 		entry.TraceMinutes += minutes
 		entry.TotalMinutes += minutes
 	}
-	return stats, trows.Err()
+	if err := trows.Err(); err != nil {
+		return nil, tzErr(err)
+	}
+	// Name order with Uncategorized last, as each query gives on its own: an Area
+	// seen only among traces would otherwise come after Uncategorized.
+	slices.SortStableFunc(stats.Areas, func(a, b model.AreaStat) int {
+		if (a.AreaID == nil) != (b.AreaID == nil) {
+			if a.AreaID == nil {
+				return 1
+			}
+			return -1
+		}
+		return strings.Compare(strings.ToLower(a.AreaName), strings.ToLower(b.AreaName))
+	})
+	return stats, nil
+}
+
+// ErrInvalidTimeZone is returned by Stats when Postgres doesn't know its tz,
+// which can happen for a name Go's own tz database accepts.
+var ErrInvalidTimeZone = errors.New("invalid time zone")
+
+// tzErr maps Postgres' "time zone not recognized" (invalid_parameter_value) to
+// ErrInvalidTimeZone.
+func tzErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "22023" {
+		return ErrInvalidTimeZone
+	}
+	return err
 }
 
 func itoa(i int) string {

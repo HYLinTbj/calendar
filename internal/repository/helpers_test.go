@@ -65,3 +65,15 @@ func seedEvent(t *testing.T, pool *pgxpool.Pool, ownerID, calendarID uuid.UUID, 
 }
 
 func intPtr(n int) *int { return &n }
+
+// findArea returns the AreaStat with the given name, or fails the test.
+func findArea(t *testing.T, stats *model.TimeStats, name string) model.AreaStat {
+	t.Helper()
+	for _, a := range stats.Areas {
+		if a.AreaName == name {
+			return a
+		}
+	}
+	t.Fatalf("area %q not found in stats %+v", name, stats.Areas)
+	return model.AreaStat{}
+}

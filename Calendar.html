@@ -89,8 +89,16 @@
     const TRACE_CUTOFF_MIN = 15;
     // Stats count a trace in the window holding the start of its day, in this zone.
     const userTz = (()=>{ try { return Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'; } catch { return 'UTC'; } })();
-    function statsUrl(from, to) {
-      return `/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(userTz)}`;
+    // The server may not know the browser's zone (ICU's "Etc/Unknown", or one newer than
+    // its tz data); then stats fall back to UTC for the session rather than failing.
+    let statsTz = userTz;
+    async function fetchStats(from, to) {
+      const url=tz=>`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(tz)}`;
+      try { return await api(url(statsTz)); }
+      catch(ex) {
+        if(statsTz==='UTC' || !ex.message.startsWith("invalid 'tz'")) throw ex;
+        statsTz='UTC'; return api(url(statsTz));
+      }
     }
     function tracesUrl(fromDay, toDay) { return `/traces?from=${fromDay}&to=${toDay}`; }
 
@@ -616,7 +624,7 @@
                     <span style={{display:'flex',width:'100%',height:5,borderRadius:3,overflow:'hidden',gap:1}}>
                       {totals.map(a=><span key={a.key} style={{flex:a.minutes,background:a.color}}/>)}
                     </span>
-                    <span style={{fontSize:11,fontFamily:'var(--font-mono)',color:'var(--text)',whiteSpace:'nowrap'}}>{fmtMins(sum)} · {items.length}</span>
+                    <span style={{fontSize:11,fontFamily:'var(--font-mono)',color:'var(--text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{fmtMins(sum)} · {items.length}</span>
                   </button>
                 ) : <div style={{height:34}}/>}
                 {open===k&&(
@@ -1363,6 +1371,7 @@
       const [groups,setGroups]= React.useState([]);
       const [events,setEvts] = React.useState([]);
       const [traces,setTraces] = React.useState([]);
+      const tracesReq = React.useRef(0); // number of the latest traces request
       const [hiddenAreas,setHiddenAreas]=React.useState(()=>loadHiddenAreas(user?.id));
       const [selCals,setSel] = React.useState(new Set());
       const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
@@ -1385,6 +1394,7 @@
 
       // load events for current range + selected calendars
       function loadEvents() {
+        loadTraces(); // traces belong to no calendar, so they load whichever are selected
         if(calendars.length===0) return;
         const ids=[...selCals]; if(ids.length===0){setEvts([]);return;}
         let from,to;
@@ -1403,13 +1413,16 @@
         // first visible day. Views place events by date, so out-of-range days aren't shown.
         Promise.all(ids.map(id=>api(`/events?calendar_id=${id}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&overlap=true`).then(d=>d||[]).catch(()=>[])))
           .then(r=>{ const seen=new Set(); setEvts(r.flat().filter(e=>{ if(seen.has(e.id)) return false; seen.add(e.id); return true; })); });
-        loadTraces();
       }
-      // Traces show in the week and day views' strip under the day headers.
+      // Traces show in the week and day views' strip under the day headers. Only the
+      // latest request's answer is kept, so quick navigation can't land an older range's.
       function loadTraces() {
+        const n=++tracesReq.current;
         if(view==='month'){ setTraces([]); return; }
         const days=view==='week'?getWeekDays(date):[date];
-        api(tracesUrl(ymd(days[0]),ymd(days[days.length-1]))).then(d=>setTraces(d||[])).catch(()=>setTraces([]));
+        api(tracesUrl(ymd(days[0]),ymd(days[days.length-1])))
+          .then(d=>{ if(n===tracesReq.current) setTraces(d||[]); })
+          .catch(()=>{ if(n===tracesReq.current) setTraces([]); });
       }
       React.useEffect(loadEvents,[view,date,calendars,selCals]);
 
@@ -1849,12 +1862,11 @@
         let live=true;
         (async()=>{
           try {
-            const ts=await api(tracesUrl(day,day))||[];
             // The week holding the day, counted up to now.
             const from=startOfWeek(dayDate(day)), now=new Date();
             const end=addDays(from,7), to=end>now?now:end;
-            const st=from<to?await api(statsUrl(from,to)):null;
-            if(live){ setTraces(ts); setWeek(st); }
+            const [ts,st]=await Promise.all([api(tracesUrl(day,day)), from<to?fetchStats(from,to):null]);
+            if(live){ setTraces(ts||[]); setWeek(st); }
           } catch(ex){ if(live) onError(ex.message); }
         })();
         return ()=>{ live=false; };
@@ -1883,6 +1895,7 @@
         } catch(ex){ onError(ex.message); }
       }
       async function del(id) {
+        if(!confirm('Delete this trace?')) return;
         try { await api(`/traces/${id}`,{method:'DELETE'}); if(editing?.id===id) setEditing(null); bump(); }
         catch(ex){ onError(ex.message); }
       }
@@ -1894,7 +1907,10 @@
       const weekRows=React.useMemo(()=>{
         const stats=week?.areas||[], byArea=Object.fromEntries(stats.map(s=>[s.area_id||'none',s]));
         const rows=ordered.map(a=>({ area:a, s:byArea[a.id] })).filter(r=>r.s||(r.area.weekly_target_minutes||0)>0);
-        if(byArea.none) rows.push({ area:null, s:byArea.none });
+        // No-area traces only: the stats' Uncategorized also counts events with no Area,
+        // which are appointments, not tracked time (as in the Ledger).
+        const none=byArea.none&&{...byArea.none,event_minutes:0,total_minutes:byArea.none.trace_minutes||0};
+        if(none?.total_minutes) rows.push({ area:null, s:none });
         const maxTotal=Math.max(1,...rows.map(r=>r.s?.total_minutes||0));
         return rows.map(({area,s})=>{
           const ev=s?.event_minutes||0, tr=s?.trace_minutes||0, tgt=area?.weekly_target_minutes||0;
@@ -2055,6 +2071,7 @@
 
     // Areas × days, summing categorized events (solid) and traces (hatched). Counts
     // what has started by now, like the stats; an event counts on the day it starts.
+    const LEDGER_MAX_DAYS = 62; // day columns the Ledger shows at most
     function TraceLedger({ user, areas, groups, version, addTrace, onError }) {
       const [range,setRange]=React.useState('week'); // week|lastweek|month|custom
       const [customFrom,setCustomFrom]=React.useState(ymd(startOfWeek(new Date())));
@@ -2068,11 +2085,12 @@
         if(range==='lastweek'){ const s=addDays(startOfWeek(now),-7); return {from:s,to:addDays(s,7),targets:true}; }
         if(range==='month'){ return {from:startOfMonth(now),to:new Date(now.getFullYear(),now.getMonth()+1,1),targets:false}; }
         if(range==='custom'){ const f=dayDate(customFrom), t=dayDate(customTo); f.setHours(0,0,0,0); t.setHours(0,0,0,0);
-          return {from:f,to:addDays(t<f?f:t,1),targets:false}; }
+          const end=addDays(t<f?f:t,1), cap=addDays(f,LEDGER_MAX_DAYS);
+          return {from:f,to:end>cap?cap:end,targets:false,capped:end>cap}; }
         const r=weekRange(now); return {from:r.from,to:r.to,targets:true};
       },[range,customFrom,customTo]);
       const days=React.useMemo(()=>{
-        const out=[]; for(let d=new Date(period.from); d<period.to && out.length<62; d=addDays(d,1)) out.push(ymd(d));
+        const out=[]; for(let d=new Date(period.from); d<period.to; d=addDays(d,1)) out.push(ymd(d));
         return out;
       },[period]);
 
@@ -2081,9 +2099,11 @@
         (async()=>{
           try {
             const now=new Date(), to=period.to>now?now:period.to;
-            const evs=period.from<to?await api(`/events?from=${encodeURIComponent(period.from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`)||[]:[];
-            const ts=await api(tracesUrl(days[0],days[days.length-1]))||[];
-            if(live){ setEvents(evs); setTraces(ts); }
+            const [evs,ts]=await Promise.all([
+              period.from<to?api(`/events?from=${encodeURIComponent(period.from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`):[],
+              api(tracesUrl(days[0],days[days.length-1])),
+            ]);
+            if(live){ setEvents(evs||[]); setTraces(ts||[]); }
           } catch(ex){ if(live) onError(ex.message); }
         })();
         return ()=>{ live=false; };
@@ -2135,6 +2155,7 @@
                 <input type="date" aria-label="From" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customFrom} max={customTo} onChange={e=>setCustomFrom(e.target.value)}/>
                 <span style={{color:'var(--text-muted)',fontSize:13}}>→</span>
                 <input type="date" aria-label="To" style={{...S.input,width:'auto',padding:'6px 8px'}} value={customTo} min={customFrom} onChange={e=>setCustomTo(e.target.value)}/>
+                {period.capped&&<span style={{fontSize:12,color:'var(--text-muted)'}}>Showing the first {LEDGER_MAX_DAYS} days</span>}
               </div>
             )}
             <div style={{display:'flex',gap:12,fontSize:12,color:'var(--text-muted)',marginLeft:'auto'}}>
@@ -2470,11 +2491,11 @@
           const gs=await api('/category-groups')||[]; setGroups(gs);
           setAreas(resolveAreas(await api('/categories')||[], gs));
           const t=await api('/tasks'); setTasks(t||[]);
-          const s=await api(statsUrl(from,statsTo));
+          const s=await fetchStats(from,statsTo);
           const m={}; (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; }); setWeekMins(m);
           const pm={};
           if(to>planFrom){
-            const sp=await api(statsUrl(planFrom,to));
+            const sp=await fetchStats(planFrom,to);
             (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
           }
           setPlannedMins(pm);

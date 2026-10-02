@@ -55,7 +55,7 @@ func (h *TraceHandler) List(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid 'to', use YYYY-MM-DD"})
 		return
 	}
-	if to.Before(from) || to.Sub(from).Hours()/24 >= maxTraceListDays {
+	if to.Before(from) || to.Sub(from).Hours()/24 > maxTraceListDays {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "'to' must be on or after 'from', at most 400 days apart"})
 		return
 	}

@@ -65,5 +65,8 @@ func ParseDate(s string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, errors.New("day must be YYYY-MM-DD")
 	}
+	if t.Year() < 1 { // Postgres has no year 0
+		return time.Time{}, errors.New("day must be in year 0001 or later")
+	}
 	return t, nil
 }
