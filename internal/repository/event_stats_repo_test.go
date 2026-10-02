@@ -14,18 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// findArea returns the AreaStat with the given name, or fails the test.
-func findArea(t *testing.T, stats *model.TimeStats, name string) model.AreaStat {
-	t.Helper()
-	for _, a := range stats.Areas {
-		if a.AreaName == name {
-			return a
-		}
-	}
-	t.Fatalf("area %q not found in stats %+v", name, stats.Areas)
-	return model.AreaStat{}
-}
-
 func TestEventStats_AggregatesByAreaAndTitle(t *testing.T) {
 	truncateAll(t, testPool)
 	ctx := context.Background()

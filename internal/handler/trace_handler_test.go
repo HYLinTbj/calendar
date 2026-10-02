@@ -54,6 +54,7 @@ func TestTraces_Validation(t *testing.T) {
 		"zero minutes":   {"day": "2026-09-30", "minutes": 0},
 		"too many":       {"day": "2026-09-30", "minutes": 1441},
 		"bad day":        {"day": "30/09/2026", "minutes": 5},
+		"year zero":      {"day": "0000-01-01", "minutes": 5},
 		"no day":         {"minutes": 5},
 		"another's area": {"day": "2026-09-30", "minutes": 5, "category_id": otherArea},
 	} {

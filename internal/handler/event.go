@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"slices"
@@ -567,6 +568,10 @@ func (h *EventHandler) Stats(c *gin.Context) {
 	}
 
 	stats, err := h.repo.Stats(c.Request.Context(), ownerID, fromVal, toVal, tz)
+	if errors.Is(err, repository.ErrInvalidTimeZone) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid 'tz', use an IANA time zone name"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
