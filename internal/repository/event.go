@@ -491,7 +491,10 @@ func compareAreas(a, b model.AreaInfo) int {
 		}
 		return -1
 	}
-	return strings.Compare(strings.ToLower(a.AreaName), strings.ToLower(b.AreaName))
+	if c := strings.Compare(strings.ToLower(a.AreaName), strings.ToLower(b.AreaName)); c != 0 {
+		return c
+	}
+	return strings.Compare(a.AreaName, b.AreaName) // names are unique per owner, but only case-sensitively
 }
 
 // Stats aggregates time spent over [from, to), grouped by Area (category): minutes
@@ -588,7 +591,8 @@ func weekOf(d, ws string) string {
 // Sat=6). An event counts in the week its start falls in, a trace in the week
 // holding its day, and event minutes are rounded per title as Stats rounds them, so
 // a week's minutes are what Stats gives over the same span. The first and last
-// weeks are partial when from and to aren't week boundaries.
+// weeks are partial when from and to aren't week boundaries. It returns
+// ErrTooManyWeeks when the range touches more than MaxWeeklyStatsWeeks weeks.
 func (r *EventRepository) WeeklyStats(ctx context.Context, ownerID uuid.UUID, from, to time.Time, tz string, weekStart int) (*model.WeeklyStats, error) {
 	stats := &model.WeeklyStats{From: from, To: to, TZ: tz, WeekStart: weekStart, Weeks: []model.Date{}, Areas: []model.AreaWeekly{}}
 	if !from.Before(to) {
@@ -604,6 +608,9 @@ func (r *EventRepository) WeeklyStats(ctx context.Context, ownerID uuid.UUID, fr
 		from, to, tz, weekStart,
 	).Scan(&first, &last); err != nil {
 		return nil, tzErr(err)
+	}
+	if last.Sub(first)/(7*24*time.Hour)+1 > MaxWeeklyStatsWeeks {
+		return nil, ErrTooManyWeeks
 	}
 	week := map[string]int{} // week's first day -> index into stats.Weeks
 	for d := first; !d.After(last); d = d.AddDate(0, 0, 7) {
@@ -687,6 +694,14 @@ func (r *EventRepository) WeeklyStats(ctx context.Context, ownerID uuid.UUID, fr
 	slices.SortStableFunc(stats.Areas, func(a, b model.AreaWeekly) int { return compareAreas(a.AreaInfo, b.AreaInfo) })
 	return stats, nil
 }
+
+// MaxWeeklyStatsWeeks is the most weeks, partial ones included, that WeeklyStats
+// splits a range into.
+const MaxWeeklyStatsWeeks = 53
+
+// ErrTooManyWeeks is returned by WeeklyStats for a range touching more than
+// MaxWeeklyStatsWeeks weeks.
+var ErrTooManyWeeks = errors.New("too many weeks")
 
 // ErrInvalidTimeZone is returned by Stats and WeeklyStats when Postgres doesn't know their tz,
 // which can happen for a name Go's own tz database accepts.

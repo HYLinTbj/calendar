@@ -547,52 +547,32 @@ func (h *EventHandler) DeleteRecurrence(c *gin.Context) {
 func (h *EventHandler) Stats(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
 
-	from, to, ok := parseRange(c)
+	from, to, ok := statsRange(c, 7)
 	if !ok {
 		return
 	}
-	toVal := time.Now()
-	if to != nil {
-		toVal = *to
-	}
-	fromVal := toVal.AddDate(0, 0, -7)
-	if from != nil {
-		fromVal = *from
-	}
-
 	tz, ok := statsTZ(c)
 	if !ok {
 		return
 	}
 
-	stats, err := h.repo.Stats(c.Request.Context(), ownerID, fromVal, toVal, tz)
+	stats, err := h.repo.Stats(c.Request.Context(), ownerID, from, to, tz)
 	respondStats(c, stats, err)
 }
-
-// maxWeeklyStatsDays bounds WeeklyStats' range: 53 weeks.
-const maxWeeklyStatsDays = 53 * 7
 
 // WeeklyStats is Stats split into weeks: GET /events/stats/weekly?from=&to=&tz=&week_start=
 // gives each Area's minutes per week (of local days in tz, starting on week_start,
 // Sun=0 … Sat=6, default Monday) over [from, to). to defaults to now, from to 8 weeks
-// before to.
+// before to. The range may touch at most repository.MaxWeeklyStatsWeeks weeks.
 func (h *EventHandler) WeeklyStats(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
 
-	from, to, ok := parseRange(c)
+	from, to, ok := statsRange(c, 7*8)
 	if !ok {
 		return
 	}
-	toVal := time.Now()
-	if to != nil {
-		toVal = *to
-	}
-	fromVal := toVal.AddDate(0, 0, -7*8)
-	if from != nil {
-		fromVal = *from
-	}
-	if !fromVal.Before(toVal) || toVal.Sub(fromVal) > maxWeeklyStatsDays*24*time.Hour {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' must be before 'to', at most 53 weeks apart"})
+	if !from.Before(to) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' must be before 'to'"})
 		return
 	}
 	tz, ok := statsTZ(c)
@@ -609,8 +589,30 @@ func (h *EventHandler) WeeklyStats(c *gin.Context) {
 		weekStart = n
 	}
 
-	stats, err := h.repo.WeeklyStats(c.Request.Context(), ownerID, fromVal, toVal, tz, weekStart)
+	stats, err := h.repo.WeeklyStats(c.Request.Context(), ownerID, from, to, tz, weekStart)
+	if errors.Is(err, repository.ErrTooManyWeeks) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "the range may touch at most " + strconv.Itoa(repository.MaxWeeklyStatsWeeks) + " weeks"})
+		return
+	}
 	respondStats(c, stats, err)
+}
+
+// statsRange reads the stats' optional "from"/"to" (RFC3339): to defaults to now, and
+// from to defaultDays before to. Returns false (after writing a 400) when either is invalid.
+func statsRange(c *gin.Context, defaultDays int) (from, to time.Time, ok bool) {
+	f, t, ok := parseRange(c)
+	if !ok {
+		return from, to, false
+	}
+	to = time.Now()
+	if t != nil {
+		to = *t
+	}
+	from = to.AddDate(0, 0, -defaultDays)
+	if f != nil {
+		from = *f
+	}
+	return from, to, true
 }
 
 // statsTZ reads the stats' optional "tz" query param (an IANA zone name, default

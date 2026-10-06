@@ -92,15 +92,17 @@
     // The server may not know the browser's zone (ICU's "Etc/Unknown", or one newer than
     // its tz data); then stats fall back to UTC for the session rather than failing.
     let statsTz = userTz;
-    // weekly: split into weeks (/events/stats/weekly), the UI's own, which start on Sunday.
-    async function fetchStats(from, to, weekly=false) {
-      const url=tz=>`/events/stats${weekly?'/weekly':''}?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(tz)}${weekly?'&week_start=0':''}`;
+    async function withStatsTz(url) {
       try { return await api(url(statsTz)); }
       catch(ex) {
         if(statsTz==='UTC' || !ex.message.startsWith("invalid 'tz'")) throw ex;
         statsTz='UTC'; return api(url(statsTz));
       }
     }
+    const statsQuery=(from,to,tz)=>`from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(tz)}`;
+    function fetchStats(from, to) { return withStatsTz(tz=>`/events/stats?${statsQuery(from,to,tz)}`); }
+    // Split into weeks (/events/stats/weekly), the UI's own, which start on Sunday.
+    function fetchWeeklyStats(from, to) { return withStatsTz(tz=>`/events/stats/weekly?${statsQuery(from,to,tz)}&week_start=0`); }
     function tracesUrl(fromDay, toDay) { return `/traces?from=${fromDay}&to=${toDay}`; }
 
     // All-day events use UTC date directly; timed events use local date
@@ -2541,25 +2543,34 @@
           const planFrom = now>from?now:from;  // remaining portion of the week
           const gs=await api('/category-groups')||[]; setGroups(gs);
           setAreas(resolveAreas(await api('/categories')||[], gs));
-          const t=await api('/tasks'); setTasks(t||[]);
           // This week so far and the ones before it; "this week" is the last of them.
-          const w=await fetchStats(addDays(from,-7*(TREND_WEEKS-1)),statsTo,true);
+          const [,w,sp]=await Promise.all([
+            loadTasks(),
+            fetchWeeklyStats(addDays(from,-7*(TREND_WEEKS-1)),statsTo),
+            to>planFrom?fetchStats(planFrom,to):null,
+          ]);
           const byArea={}, m={};
-          (w?.areas||[]).forEach(a=>{ if(a.area_id){ byArea[a.area_id]=a.minutes; m[a.area_id]=a.minutes[a.minutes.length-1]||0; } });
-          setTrend({ weeks:w?.weeks||[], byArea }); setWeekMins(m);
-          const pm={};
-          if(to>planFrom){
-            const sp=await fetchStats(planFrom,to);
-            (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
+          if(w?.tz===userTz){
+            (w.areas||[]).forEach(a=>{ if(a.area_id){ byArea[a.area_id]=a.minutes; m[a.area_id]=a.minutes[a.minutes.length-1]||0; } });
+          } else {
+            // Stats fell back to UTC, whose weeks aren't the browser's: no trend, and
+            // this week from /events/stats over exactly its local span.
+            const s=await fetchStats(from,statsTo);
+            (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; });
           }
+          setTrend({ weeks:w?.tz===userTz?w.weeks:[], byArea }); setWeekMins(m);
+          const pm={};
+          (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
           setPlannedMins(pm);
         } catch(ex){ setErr(ex.message); }
       }
       React.useEffect(()=>{ loadAll(); },[]);
+      async function loadTasks(){ const t=await api('/tasks'); setTasks(t||[]); }
 
-      async function toggleTask(t){ try{ await api(`/tasks/${t.id}`,{method:'PUT',body:JSON.stringify({done:!t.done})}); await loadAll(); }catch(ex){setErr(ex.message);} }
-      async function addTask(areaId,title){ if(!title.trim())return; try{ await api('/tasks',{method:'POST',body:JSON.stringify({area_id:areaId||null,title:title.trim()})}); await loadAll(); }catch(ex){setErr(ex.message);} }
-      async function delTask(id){ try{ await api(`/tasks/${id}`,{method:'DELETE'}); await loadAll(); }catch(ex){setErr(ex.message);} }
+      // Tasks carry no time, so changing one only reloads the tasks.
+      async function toggleTask(t){ try{ await api(`/tasks/${t.id}`,{method:'PUT',body:JSON.stringify({done:!t.done})}); await loadTasks(); }catch(ex){setErr(ex.message);} }
+      async function addTask(areaId,title){ if(!title.trim())return; try{ await api('/tasks',{method:'POST',body:JSON.stringify({area_id:areaId||null,title:title.trim()})}); await loadTasks(); }catch(ex){setErr(ex.message);} }
+      async function delTask(id){ try{ await api(`/tasks/${id}`,{method:'DELETE'}); await loadTasks(); }catch(ex){setErr(ex.message);} }
 
       const tasksByArea=React.useMemo(()=>{
         const m={};

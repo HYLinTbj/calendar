@@ -114,15 +114,20 @@ func TestWeeklyStats_Validation(t *testing.T) {
 		"bad tz":             ok + "&tz=Not/AZone",
 		"empty range":        rng(from, from),
 		"from after to":      rng(from, from.AddDate(0, 0, -7)),
-		"over 53 weeks":      rng(from, from.AddDate(0, 0, 53*7+1)),
+		"over 53 weeks":      rng(from, from.AddDate(0, 0, 53*7+1)) + "&week_start=0",
+		"54 weeks touched":   rng(from, from.AddDate(0, 0, 53*7)), // from is a Sunday: Monday weeks
 		"bad from":           "from=yesterday",
 	} {
 		w := Do(t, testRouter, "GET", "/events/stats/weekly?"+query, token, nil)
 		assert.Equal(t, http.StatusBadRequest, w.Code, "%s: %s", name, w.Body.String())
 	}
 
-	w := Do(t, testRouter, "GET", "/events/stats/weekly?"+rng(from, from.AddDate(0, 0, 53*7)), token, nil)
+	w := Do(t, testRouter, "GET", "/events/stats/weekly?"+rng(from, from.AddDate(0, 0, 53*7))+"&week_start=0", token, nil)
 	assert.Equal(t, http.StatusOK, w.Code, "53 weeks: %s", w.Body.String())
+	// 53 local weeks across three DST changes are an hour over 53×7 days.
+	toronto := rng(time.Date(2025, 11, 2, 4, 0, 0, 0, time.UTC), time.Date(2026, 11, 8, 5, 0, 0, 0, time.UTC))
+	w = Do(t, testRouter, "GET", "/events/stats/weekly?"+toronto+"&tz=America/Toronto&week_start=0", token, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "53 Toronto weeks: %s", w.Body.String())
 
 	w = Do(t, testRouter, "GET", "/events/stats/weekly", "", nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
