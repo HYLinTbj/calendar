@@ -92,14 +92,17 @@
     // The server may not know the browser's zone (ICU's "Etc/Unknown", or one newer than
     // its tz data); then stats fall back to UTC for the session rather than failing.
     let statsTz = userTz;
-    async function fetchStats(from, to) {
-      const url=tz=>`/events/stats?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(tz)}`;
+    async function withStatsTz(url) {
       try { return await api(url(statsTz)); }
       catch(ex) {
         if(statsTz==='UTC' || !ex.message.startsWith("invalid 'tz'")) throw ex;
         statsTz='UTC'; return api(url(statsTz));
       }
     }
+    const statsQuery=(from,to,tz)=>`from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(tz)}`;
+    function fetchStats(from, to) { return withStatsTz(tz=>`/events/stats?${statsQuery(from,to,tz)}`); }
+    // Split into weeks (/events/stats/weekly), the UI's own, which start on Sunday.
+    function fetchWeeklyStats(from, to) { return withStatsTz(tz=>`/events/stats/weekly?${statsQuery(from,to,tz)}&week_start=0`); }
     function tracesUrl(fromDay, toDay) { return `/traces?from=${fromDay}&to=${toDay}`; }
 
     // All-day events use UTC date directly; timed events use local date
@@ -2274,7 +2277,54 @@
       );
     }
 
-    function AreaCard({ area, tasks, weekMins, plannedMins=0, onToggle, onAdd, onDel, onEdit }) {
+    const TREND_WEEKS = 8; // weeks an Area card's trend shows, this one included
+
+    // An Area's minutes in each of the last few weeks (oldest first, this week last),
+    // against its weekly target. A week counts toward "met N of K" once it's over if the
+    // Area existed all of it; a partial week (this one, or the one the Area was created
+    // in) counts only if its target was met.
+    function WeekTrend({ area, weeks, minutes }) {
+      const tgt=area.weekly_target_minutes||0, color=areaColor(area), H=28;
+      const created=area.created_at?new Date(area.created_at):null;
+      const scale=Math.max(tgt,...minutes,1);
+      const info=weeks.map((k,i)=>{
+        const start=new Date(`${k}T00:00:00`), m=minutes[i]||0, current=i===weeks.length-1;
+        const whole=!created||created<=start;            // the Area existed all week
+        const born=!created||created<addDays(start,7);   // … or for some of it
+        const met=tgt>0&&m>=tgt;
+        return { k, start, m, current, met, born, whole, counted:met||(!current&&whole) };
+      });
+      const counted=info.filter(w=>w.counted), metN=counted.filter(w=>w.met).length;
+      const past=info.filter(w=>!w.current&&(w.whole||w.m>0));
+      const avg=past.length?past.reduce((n,w)=>n+w.m,0)/past.length:0;
+      const caption=tgt>0
+        ? (counted.length?`Target met ${metN} of the last ${counted.length} week${counted.length===1?'':'s'}`:'')
+        : (avg>0?`Avg ${fmtMins(avg)} a week`:'');
+      return (
+        <div style={{marginTop:10}}>
+          <div role="img" aria-label={caption||`Last ${weeks.length} weeks`} style={{position:'relative',display:'flex',alignItems:'flex-end',gap:3,height:H}}>
+            {tgt>0&&<div style={{position:'absolute',left:0,right:0,bottom:Math.round(tgt/scale*H),borderTop:'1px dashed var(--text-muted)',opacity:0.7,pointerEvents:'none'}}/>}
+            {info.map(w=>{
+              const h=w.m>0?Math.max(2,Math.round(w.m/scale*H)):0;
+              const label=`${w.current?'This week':`Week of ${w.start.toLocaleDateString([],{month:'short',day:'numeric'})}`}: `
+                +`${fmtMins(w.m)}${tgt>0?` / ${fmtMins(tgt)}`:''}${w.current?' so far':''}`;
+              // This week, while short of its target, is striped: still in progress.
+              const fill=w.current&&!w.met
+                ? {background:`repeating-linear-gradient(135deg, ${color} 0 3px, transparent 3px 6px)`,boxShadow:`inset 0 0 0 1px ${color}`}
+                : {background:color,opacity:w.met||tgt===0?1:0.35};
+              return (
+                <div key={w.k} title={label} style={{flex:1,height:'100%',display:'flex',alignItems:'flex-end',borderBottom:`1px solid ${w.born?'var(--border)':'transparent'}`}}>
+                  {h>0&&<div style={{width:'100%',height:h,borderRadius:'2px 2px 0 0',...fill}}/>}
+                </div>
+              );
+            })}
+          </div>
+          {caption&&<div style={{fontSize:11,color:'var(--text-muted)',marginTop:5}}>{caption}</div>}
+        </div>
+      );
+    }
+
+    function AreaCard({ area, tasks, weekMins, plannedMins=0, trend, onToggle, onAdd, onDel, onEdit }) {
       const [newTitle,setNewTitle]=React.useState('');
       const [showDone,setShowDone]=React.useState(false);
       const open=tasks.filter(t=>!t.done);
@@ -2283,6 +2333,7 @@
       const donePct=tgt>0?Math.min(100,weekMins/tgt*100):0;
       const planPct=tgt>0?Math.min(100-donePct,plannedMins/tgt*100):0;
       const projected=weekMins+plannedMins;
+      const showTrend=trend&&trend.weeks.length>0&&(tgt>0||trend.minutes.some(m=>m>0));
       return (
         <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:12,padding:16,display:'flex',flexDirection:'column'}}>
           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
@@ -2292,7 +2343,7 @@
             <div style={{fontSize:15,fontWeight:600,flex:1}}>{area.name}</div>
             {onEdit&&<button style={S.iconBtn} title="Edit area" onClick={onEdit}>✎</button>}
           </div>
-          {(tgt>0||weekMins>0||plannedMins>0)&&(
+          {(tgt>0||weekMins>0||plannedMins>0||showTrend)&&(
             <div style={{marginBottom:12}}>
               <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'var(--text-muted)',marginBottom:4}}>
                 <span>This week</span><span style={{fontFamily:'var(--font-mono)'}}>{fmtMins(weekMins)}{tgt>0?` / ${fmtMins(tgt)}`:''}</span>
@@ -2309,6 +2360,7 @@
                   <span>{fmtMins(plannedMins)} planned{tgt>0?(projected<tgt?` · ${fmtMins(tgt-projected)} to target`:' · on track'):''}</span>
                 </div>
               )}
+              {showTrend&&<WeekTrend area={area} weeks={trend.weeks} minutes={trend.minutes}/>}
             </div>
           )}
           <div style={{display:'flex',flexDirection:'column',gap:2}}>
@@ -2478,6 +2530,7 @@
       const [tasks,setTasks]=React.useState([]);
       const [weekMins,setWeekMins]=React.useState({});
       const [plannedMins,setPlannedMins]=React.useState({});
+      const [trend,setTrend]=React.useState({ weeks:[], byArea:{} }); // minutes per week, this week last
       const [editing,setEditing]=React.useState(null); // {groupId} for new | area | null
       const [editingGroup,setEditingGroup]=React.useState(null); // 'new' | group | null
       const [err,setErr]=React.useState('');
@@ -2490,22 +2543,34 @@
           const planFrom = now>from?now:from;  // remaining portion of the week
           const gs=await api('/category-groups')||[]; setGroups(gs);
           setAreas(resolveAreas(await api('/categories')||[], gs));
-          const t=await api('/tasks'); setTasks(t||[]);
-          const s=await fetchStats(from,statsTo);
-          const m={}; (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; }); setWeekMins(m);
-          const pm={};
-          if(to>planFrom){
-            const sp=await fetchStats(planFrom,to);
-            (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
+          // This week so far and the ones before it; "this week" is the last of them.
+          const [,w,sp]=await Promise.all([
+            loadTasks(),
+            fetchWeeklyStats(addDays(from,-7*(TREND_WEEKS-1)),statsTo),
+            to>planFrom?fetchStats(planFrom,to):null,
+          ]);
+          const byArea={}, m={};
+          if(w?.tz===userTz){
+            (w.areas||[]).forEach(a=>{ if(a.area_id){ byArea[a.area_id]=a.minutes; m[a.area_id]=a.minutes[a.minutes.length-1]||0; } });
+          } else {
+            // Stats fell back to UTC, whose weeks aren't the browser's: no trend, and
+            // this week from /events/stats over exactly its local span.
+            const s=await fetchStats(from,statsTo);
+            (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; });
           }
+          setTrend({ weeks:w?.tz===userTz?w.weeks:[], byArea }); setWeekMins(m);
+          const pm={};
+          (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
           setPlannedMins(pm);
         } catch(ex){ setErr(ex.message); }
       }
       React.useEffect(()=>{ loadAll(); },[]);
+      async function loadTasks(){ const t=await api('/tasks'); setTasks(t||[]); }
 
-      async function toggleTask(t){ try{ await api(`/tasks/${t.id}`,{method:'PUT',body:JSON.stringify({done:!t.done})}); await loadAll(); }catch(ex){setErr(ex.message);} }
-      async function addTask(areaId,title){ if(!title.trim())return; try{ await api('/tasks',{method:'POST',body:JSON.stringify({area_id:areaId||null,title:title.trim()})}); await loadAll(); }catch(ex){setErr(ex.message);} }
-      async function delTask(id){ try{ await api(`/tasks/${id}`,{method:'DELETE'}); await loadAll(); }catch(ex){setErr(ex.message);} }
+      // Tasks carry no time, so changing one only reloads the tasks.
+      async function toggleTask(t){ try{ await api(`/tasks/${t.id}`,{method:'PUT',body:JSON.stringify({done:!t.done})}); await loadTasks(); }catch(ex){setErr(ex.message);} }
+      async function addTask(areaId,title){ if(!title.trim())return; try{ await api('/tasks',{method:'POST',body:JSON.stringify({area_id:areaId||null,title:title.trim()})}); await loadTasks(); }catch(ex){setErr(ex.message);} }
+      async function delTask(id){ try{ await api(`/tasks/${id}`,{method:'DELETE'}); await loadTasks(); }catch(ex){setErr(ex.message);} }
 
       const tasksByArea=React.useMemo(()=>{
         const m={};
@@ -2547,6 +2612,7 @@
                     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:18,alignItems:'start'}}>
                       {sectionAreas.map(a=>(
                         <AreaCard key={a.id} area={a} tasks={tasksByArea[a.id]||[]} weekMins={weekMins[a.id]||0} plannedMins={plannedMins[a.id]||0}
+                          trend={{ weeks:trend.weeks, minutes:trend.byArea[a.id]||trend.weeks.map(()=>0) }}
                           onToggle={toggleTask} onAdd={addTask} onDel={delTask} onEdit={()=>setEditing(a)}/>
                       ))}
                       {showNone&&noAreaCard()}
