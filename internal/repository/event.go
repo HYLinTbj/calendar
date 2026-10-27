@@ -696,8 +696,8 @@ func (r *EventRepository) WeeklyStats(ctx context.Context, ownerID uuid.UUID, fr
 }
 
 // MaxWeeklyStatsWeeks is the most weeks, partial ones included, that WeeklyStats
-// splits a range into.
-const MaxWeeklyStatsWeeks = 53
+// splits a range into: enough for any calendar year, which can touch 54.
+const MaxWeeklyStatsWeeks = 54
 
 // ErrTooManyWeeks is returned by WeeklyStats for a range touching more than
 // MaxWeeklyStatsWeeks weeks.

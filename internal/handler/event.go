@@ -562,12 +562,16 @@ func (h *EventHandler) Stats(c *gin.Context) {
 
 // WeeklyStats is Stats split into weeks: GET /events/stats/weekly?from=&to=&tz=&week_start=
 // gives each Area's minutes per week (of local days in tz, starting on week_start,
-// Sun=0 … Sat=6, default Monday) over [from, to). to defaults to now, from to 8 weeks
-// before to. The range may touch at most repository.MaxWeeklyStatsWeeks weeks.
+// Sun=0 … Sat=6, default Monday) over [from, to). from is required, to defaults to
+// now. The range may touch at most repository.MaxWeeklyStatsWeeks weeks.
 func (h *EventHandler) WeeklyStats(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
 
-	from, to, ok := statsRange(c, 7*8)
+	if c.Query("from") == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' is required"})
+		return
+	}
+	from, to, ok := statsRange(c, 0) // from is given: no default
 	if !ok {
 		return
 	}

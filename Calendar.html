@@ -93,10 +93,11 @@
     // its tz data); then stats fall back to UTC for the session rather than failing.
     let statsTz = userTz;
     async function withStatsTz(url) {
-      try { return await api(url(statsTz)); }
+      const tz=statsTz; // the zone this call sent: another, running at once, may fall back first
+      try { return await api(url(tz)); }
       catch(ex) {
-        if(statsTz==='UTC' || !ex.message.startsWith("invalid 'tz'")) throw ex;
-        statsTz='UTC'; return api(url(statsTz));
+        if(tz==='UTC' || !ex.message.startsWith("invalid 'tz'")) throw ex;
+        statsTz='UTC'; return api(url('UTC'));
       }
     }
     const statsQuery=(from,to,tz)=>`from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}&tz=${encodeURIComponent(tz)}`;
@@ -2544,24 +2545,28 @@
           const gs=await api('/category-groups')||[]; setGroups(gs);
           setAreas(resolveAreas(await api('/categories')||[], gs));
           // This week so far and the ones before it; "this week" is the last of them.
+          // UTC weeks aren't the browser's, so once stats fell back to UTC there's no trend.
+          // startOfWeek again: from is at 01:00 when DST skipped this Sunday's midnight.
+          const trendFrom=startOfWeek(addDays(from,-7*(TREND_WEEKS-1)));
           const [,w,sp]=await Promise.all([
             loadTasks(),
-            fetchWeeklyStats(addDays(from,-7*(TREND_WEEKS-1)),statsTo),
+            statsTz===userTz?fetchWeeklyStats(trendFrom,statsTo).catch(()=>null):null,
             to>planFrom?fetchStats(planFrom,to):null,
           ]);
-          const byArea={}, m={};
-          if(w?.tz===userTz){
+          const trendOk=w?.tz===userTz, byArea={}, m={};
+          if(trendOk){
             (w.areas||[]).forEach(a=>{ if(a.area_id){ byArea[a.area_id]=a.minutes; m[a.area_id]=a.minutes[a.minutes.length-1]||0; } });
           } else {
-            // Stats fell back to UTC, whose weeks aren't the browser's: no trend, and
-            // this week from /events/stats over exactly its local span.
+            // No trend (it failed, or stats fell back to UTC): this week from
+            // /events/stats over exactly its local span.
             const s=await fetchStats(from,statsTo);
             (s?.areas||[]).forEach(a=>{ if(a.area_id) m[a.area_id]=a.total_minutes; });
           }
-          setTrend({ weeks:w?.tz===userTz?w.weeks:[], byArea }); setWeekMins(m);
+          setTrend({ weeks:trendOk?w.weeks:[], byArea }); setWeekMins(m);
           const pm={};
           (sp?.areas||[]).forEach(a=>{ if(a.area_id) pm[a.area_id]=a.total_minutes; });
           setPlannedMins(pm);
+          setErr('');
         } catch(ex){ setErr(ex.message); }
       }
       React.useEffect(()=>{ loadAll(); },[]);
