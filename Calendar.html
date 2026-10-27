@@ -2546,9 +2546,11 @@
           setAreas(resolveAreas(await api('/categories')||[], gs));
           // This week so far and the ones before it; "this week" is the last of them.
           // UTC weeks aren't the browser's, so once stats fell back to UTC there's no trend.
+          // startOfWeek again: from is at 01:00 when DST skipped this Sunday's midnight.
+          const trendFrom=startOfWeek(addDays(from,-7*(TREND_WEEKS-1)));
           const [,w,sp]=await Promise.all([
             loadTasks(),
-            statsTz===userTz?fetchWeeklyStats(addDays(from,-7*(TREND_WEEKS-1)),statsTo).catch(()=>null):null,
+            statsTz===userTz?fetchWeeklyStats(trendFrom,statsTo).catch(()=>null):null,
             to>planFrom?fetchStats(planFrom,to):null,
           ]);
           const trendOk=w?.tz===userTz, byArea={}, m={};

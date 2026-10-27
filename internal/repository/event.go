@@ -695,6 +695,19 @@ func (r *EventRepository) WeeklyStats(ctx context.Context, ownerID uuid.UUID, fr
 	return stats, nil
 }
 
+// LastWeeksStart returns where the last n of WeeklyStats' weeks up to to begin: local
+// midnight in tz on the first day (weekday weekStart) of the week n-1 weeks before
+// the one holding to's last instant. Where DST skips that midnight, it's the day's
+// first instant. Postgres' zone rules decide, as they do WeeklyStats' weeks.
+func (r *EventRepository) LastWeeksStart(ctx context.Context, to time.Time, tz string, weekStart, n int) (time.Time, error) {
+	var from time.Time
+	err := r.pool.QueryRow(ctx,
+		`SELECT (`+weekOf(`(($1::timestamptz - interval '1 microsecond') AT TIME ZONE $2)::date`, `$3::int`)+` - $4::int)::timestamp AT TIME ZONE $2`,
+		to, tz, weekStart, 7*(n-1),
+	).Scan(&from)
+	return from, tzErr(err)
+}
+
 // MaxWeeklyStatsWeeks is the most weeks, partial ones included, that WeeklyStats
 // splits a range into.
 const MaxWeeklyStatsWeeks = 53
