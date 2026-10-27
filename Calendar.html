@@ -663,7 +663,7 @@
       React.useEffect(()=>{ if(ref.current) ref.current.scrollTop=7*HOUR_H-30; },[]);
       const today=new Date();
       const HOURS=Array.from({length:24},(_,i)=>i);
-      const [drag,setDrag]=React.useState(null); // { evt, dayIndex, startMin, durMin, moved, ... }
+      const [drag,setDrag]=React.useState(null); // { evt, dayIndex, rel, durMs, moved, ... }
       const suppressClick=React.useRef(0); // timestamp of last drag end; swallows the trailing click
 
       // Timed events per day column. One crossing midnight is split into a segment per
@@ -685,16 +685,20 @@
       },[days,events]);
       const hasAllDay=Object.values(allDayByDay).some(a=>a.length>0);
 
-      // Apply the in-progress drag as a preview: pull the dragged event out of its
-      // origin day and drop a repositioned clone into the target day/time.
+      // Where a drag puts the event: rel minutes after midnight of the column under the
+      // pointer (negative when it starts the day before), for the same duration.
+      function dragTimes(d) {
+        const start=new Date(days[d.dayIndex]); start.setHours(0,0,0,0); start.setMinutes(d.rel);
+        return { start, end:new Date(start.getTime()+d.durMs) };
+      }
+      // Apply the in-progress drag as a preview: pull the dragged event out of every
+      // day and put a moved clone in each day it now covers.
       const renderByDay=React.useMemo(()=>{
         if(!drag||!drag.moved) return byDay;
         const m={}; for(const key in byDay) m[key]=byDay[key].filter(sg=>sg.evt.id!==drag.evt.id);
-        const day=days[drag.dayIndex]; const k=ymd(day);
-        const ns=new Date(day); ns.setHours(0,0,0,0); ns.setMinutes(drag.startMin);
-        const ne=new Date(ns.getTime()+drag.durMin*60000);
-        (m[k]=m[k]||[]).push({key:k,start:ns,end:ne,before:false,after:false,
-          evt:{...drag.evt,start_time:ns.toISOString(),end_time:ne.toISOString(),_drag:true}});
+        const { start, end }=dragTimes(drag);
+        const evt={...drag.evt,start_time:start.toISOString(),end_time:end.toISOString(),_drag:true};
+        timedSegments(evt).forEach(sg=>{ if(m[sg.key]) m[sg.key].push({...sg,evt}); });
         return m;
       },[byDay,drag,days]);
 
@@ -747,19 +751,29 @@
       // Pointer-drag an event to reschedule it: vertical = 15-min steps, horizontal
       // = day columns (week view). Moving past a small threshold suppresses the click
       // so it reschedules instead of opening the editor; the drop preserves duration.
+      // Any piece of an event crossing midnight can be grabbed to move all of it.
       function onEventDown(e, evt, di) {
         if(e.button!==0 || evt.all_day || !onEventDrop) return;
         const s=new Date(evt.start_time), en=new Date(evt.end_time);
-        const base={ evt, originDayIndex:di, originStartMin:s.getHours()*60+s.getMinutes(),
-                     durMin:Math.max(Math.round((en-s)/60000),15), startX:e.clientX, startY:e.clientY };
-        let cur={...base,dayIndex:di,startMin:base.originStartMin,moved:false};
+        // The start in minutes after the grabbed column's midnight: negative when the
+        // piece grabbed continues from the day before.
+        const col=new Date(days[di]); col.setHours(0,0,0,0);
+        const startDay=new Date(s); startDay.setHours(0,0,0,0);
+        const rel0=s.getHours()*60+s.getMinutes()-Math.round((col-startDay)/864e5)*24*60;
+        const durMs=en-s;
+        // Dragged down, an event may run past midnight. It keeps at least 15 min (or what
+        // it had) in the column under the pointer, and one starting in the grabbed column
+        // stops at its top.
+        const lo=rel0>=0?0:Math.min(rel0,Math.ceil(15-durMs/60000)), hi=Math.max(rel0,24*60-15);
+        const base={ evt, originDayIndex:di, rel0, durMs, startX:e.clientX, startY:e.clientY };
+        let cur={...base,dayIndex:di,rel:rel0,moved:false};
         setDrag(cur);
         const move=ev=>{
           if(!cur.moved && Math.abs(ev.clientX-base.startX)<4 && Math.abs(ev.clientY-base.startY)<4) return;
           ev.preventDefault();
           document.body.style.cursor='grabbing'; document.body.style.userSelect='none';
           const deltaMin=Math.round(((ev.clientY-base.startY)/HOUR_H*60)/15)*15;
-          const startMin=Math.max(0,Math.min(24*60-base.durMin,base.originStartMin+deltaMin));
+          const rel=Math.max(lo,Math.min(hi,base.rel0+deltaMin));
           let dayIndex=base.originDayIndex;
           const el=ref.current;
           if(el && days.length>1){
@@ -767,7 +781,7 @@
             const colW=(el.clientWidth-52)/days.length; // clientWidth excludes the scrollbar
             dayIndex=Math.max(0,Math.min(days.length-1,Math.floor((ev.clientX-r.left-52)/colW)));
           }
-          cur={...base,dayIndex,startMin,moved:true};
+          cur={...base,dayIndex,rel,moved:true};
           setDrag(cur);
         };
         // finish tears down listeners and restores body styles. The browser can end
@@ -781,9 +795,8 @@
           document.body.style.cursor=''; document.body.style.userSelect='';
           if(!cancelled && cur.moved){
             suppressClick.current=Date.now();
-            const day=days[cur.dayIndex];
-            const ns=new Date(day); ns.setHours(0,0,0,0); ns.setMinutes(cur.startMin);
-            onEventDrop(base.evt, ns, new Date(ns.getTime()+base.durMin*60000));
+            const { start, end }=dragTimes(cur);
+            onEventDrop(base.evt, start, end);
           }
           setDrag(null);
         };
@@ -864,12 +877,9 @@
                         const col=getEventColor(evt,calendars,categories);
                         const area=getEventArea(evt,categories);
                         const dragging=!!evt._drag;
-                        // Dragging moves the event within one day, so one spanning midnight is
-                        // rescheduled from the editor instead.
-                        const draggable=!sg.before&&!sg.after;
                         return (
-                          <div key={evt.id} style={{...evStyle(sg,col,lay[evt.id],dragging,draggable),...(dragging?{pointerEvents:'none'}:null)}}
-                               onPointerDown={dragging||!draggable?undefined:e=>onEventDown(e,evt,di)}
+                          <div key={evt.id} style={{...evStyle(sg,col,lay[evt.id],dragging,!!onEventDrop),...(dragging?{pointerEvents:'none'}:null)}}
+                               onPointerDown={dragging?undefined:e=>onEventDown(e,evt,di)}
                                onClick={e=>{ e.stopPropagation(); if(Date.now()-suppressClick.current<300) return; onEventClick(evt); }}>
                             <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>
                               {area?.code&&<span style={{marginRight:4}}><AreaBadge area={area} onColor size={9}/></span>}<SeriesMark evt={evt}/>{evt.title}
