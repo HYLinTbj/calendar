@@ -562,17 +562,14 @@ func (h *EventHandler) Stats(c *gin.Context) {
 
 // WeeklyStats is Stats split into weeks: GET /events/stats/weekly?from=&to=&tz=&week_start=
 // gives each Area's minutes per week (of local days in tz, starting on week_start,
-// Sun=0 … Sat=6, default Monday) over [from, to). to defaults to now, from to 8 weeks
-// before to. The range may touch at most repository.MaxWeeklyStatsWeeks weeks.
+// Sun=0 … Sat=6, default Monday) over [from, to). to defaults to now, from to the
+// start of the week 7 weeks before to's: 8 weeks, none partial but the one to ends in.
+// The range may touch at most repository.MaxWeeklyStatsWeeks weeks.
 func (h *EventHandler) WeeklyStats(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
 
-	from, to, ok := statsRange(c, 7*8)
+	from, to, ok := statsRange(c, 0)
 	if !ok {
-		return
-	}
-	if !from.Before(to) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' must be before 'to'"})
 		return
 	}
 	tz, ok := statsTZ(c)
@@ -587,6 +584,14 @@ func (h *EventHandler) WeeklyStats(c *gin.Context) {
 			return
 		}
 		weekStart = n
+	}
+	if c.Query("from") == "" {
+		loc, _ := time.LoadLocation(tz) // statsTZ checked it
+		from = weeksBefore(to, loc, weekStart, 8)
+	}
+	if !from.Before(to) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' must be before 'to'"})
+		return
 	}
 
 	stats, err := h.repo.WeeklyStats(c.Request.Context(), ownerID, from, to, tz, weekStart)
@@ -613,6 +618,15 @@ func statsRange(c *gin.Context, defaultDays int) (from, to time.Time, ok bool) {
 		from = *f
 	}
 	return from, to, true
+}
+
+// weeksBefore returns where the last n weeks up to to begin: local midnight in loc
+// on the first day of the week (starting on weekday weekStart) n-1 weeks before the
+// one holding to's last instant. These are the weeks WeeklyStats buckets by.
+func weeksBefore(to time.Time, loc *time.Location, weekStart, n int) time.Time {
+	last := to.Add(-time.Microsecond).In(loc)
+	day := time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, loc)
+	return day.AddDate(0, 0, -((int(day.Weekday())-weekStart+7)%7 + 7*(n-1)))
 }
 
 // statsTZ reads the stats' optional "tz" query param (an IANA zone name, default

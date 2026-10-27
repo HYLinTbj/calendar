@@ -85,17 +85,30 @@ func TestWeeklyStats_Endpoint(t *testing.T) {
 	assert.Equal(t, 120, stats.Areas[0].WeeklyTargetMinutes)
 	assert.Equal(t, []int{45, 15}, stats.Areas[0].Minutes)
 
-	// Defaults: Monday weeks, UTC, the 8 weeks before now.
+	// Defaults: Monday weeks, UTC, the 8 weeks up to now, whole but for this one.
 	w = Do(t, testRouter, "GET", "/events/stats/weekly", token, nil)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 	stats = model.WeeklyStats{}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&stats))
 	assert.Equal(t, 1, stats.WeekStart)
 	assert.Equal(t, "UTC", stats.TZ)
-	assert.Len(t, stats.Weeks, 9) // 56 days touch 9 weeks unless they start on a Monday midnight
+	require.Len(t, stats.Weeks, 8)
 	first, err := model.ParseDate(string(stats.Weeks[0]))
 	require.NoError(t, err)
 	assert.Equal(t, time.Monday, first.Weekday())
+	assert.True(t, stats.From.Equal(first), "from %s, first week %s", stats.From, stats.Weeks[0])
+
+	// Without from, the range starts at local midnight on a week's first day, here
+	// before the DST change that to is after.
+	to = time.Date(2026, 11, 5, 15, 0, 0, 0, time.UTC) // Thursday
+	w = Do(t, testRouter, "GET", "/events/stats/weekly?tz=America/Toronto&week_start=0&to="+to.Format(time.RFC3339), token, nil)
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	stats = model.WeeklyStats{}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&stats))
+	require.Len(t, stats.Weeks, 8)
+	assert.Equal(t, model.Date("2026-09-13"), stats.Weeks[0])
+	assert.Equal(t, model.Date("2026-11-01"), stats.Weeks[7])
+	assert.True(t, stats.From.Equal(time.Date(2026, 9, 13, 4, 0, 0, 0, time.UTC)), "from %s", stats.From) // EDT midnight
 }
 
 func TestWeeklyStats_Validation(t *testing.T) {
