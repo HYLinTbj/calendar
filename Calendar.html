@@ -665,6 +665,7 @@
       const HOURS=Array.from({length:24},(_,i)=>i);
       const [drag,setDrag]=React.useState(null); // { evt, dayIndex, rel, durMs, moved, ... }
       const suppressClick=React.useRef(0); // timestamp of last drag end; swallows the trailing click
+      const dragPointer=React.useRef(null); // the pointer driving the drag under way, if any
 
       // Timed events per day column. One crossing midnight is split into a segment per
       // day it covers, each clipped to its day, so it neither runs off the bottom of its
@@ -686,9 +687,11 @@
       const hasAllDay=Object.values(allDayByDay).some(a=>a.length>0);
 
       // Where a drag puts the event: rel minutes after midnight of the column under the
-      // pointer (negative when it starts the day before), for the same duration.
+      // pointer (negative when it starts the day before), keeping the start's seconds and
+      // the duration. One setHours call: setHours(0) then setMinutes would land an hour
+      // late on a day whose midnight DST skips (Santiago), where setHours(0) gives 01:00.
       function dragTimes(d) {
-        const start=new Date(days[d.dayIndex]); start.setHours(0,0,0,0); start.setMinutes(d.rel);
+        const start=new Date(days[d.dayIndex]); start.setHours(0,d.rel,0,d.secMs);
         return { start, end:new Date(start.getTime()+d.durMs) };
       }
       // Apply the in-progress drag as a preview: pull the dragged event out of every
@@ -727,7 +730,7 @@
         return lay;
       }
 
-      function evStyle(sg,col,pos,dragging,draggable) {
+      function evStyle(sg,col,pos,dragging) {
         const s=sg.start, en=sg.end;
         const dur=Math.max((en-s)/60000,30);
         const height=Math.max(dur*(HOUR_H/60)-2,20);
@@ -742,7 +745,7 @@
         return { position:'absolute',top,height,
                  left:`calc(${pos.col*w}% + 2px)`,width:`calc(${w}% - 6px)`,boxSizing:'border-box',
                  background:col,borderRadius:`${rTop}px ${rTop}px ${rBottom}px ${rBottom}px`,padding:'2px 6px',overflow:'hidden',
-                 cursor:dragging?'grabbing':draggable?'grab':'pointer',color:'#fff',fontSize:11,fontWeight:500,
+                 cursor:dragging?'grabbing':onEventDrop?'grab':'pointer',color:'#fff',fontSize:11,fontWeight:500,
                  zIndex:dragging?5:1,opacity:dragging?0.95:1,
                  boxShadow:dragging?'0 6px 16px rgba(0,0,0,0.28)':'none',
                  touchAction:'none',userSelect:'none',WebkitUserSelect:'none' };
@@ -753,34 +756,41 @@
       // so it reschedules instead of opening the editor; the drop preserves duration.
       // Any piece of an event crossing midnight can be grabbed to move all of it.
       function onEventDown(e, evt, di) {
-        if(e.button!==0 || evt.all_day || !onEventDrop) return;
+        // One drag at a time: a second finger neither starts another nor steers this one.
+        if(e.button!==0 || evt.all_day || !onEventDrop || dragPointer.current!==null) return;
+        const pid=e.pointerId;
         const s=new Date(evt.start_time), en=new Date(evt.end_time);
         // The start in minutes after the grabbed column's midnight: negative when the
         // piece grabbed continues from the day before.
         const col=new Date(days[di]); col.setHours(0,0,0,0);
         const startDay=new Date(s); startDay.setHours(0,0,0,0);
         const rel0=s.getHours()*60+s.getMinutes()-Math.round((col-startDay)/864e5)*24*60;
-        const durMs=en-s;
-        // Dragged down, an event may run past midnight. It keeps at least 15 min (or what
-        // it had) in the column under the pointer, and one starting in the grabbed column
-        // stops at its top.
-        const lo=rel0>=0?0:Math.min(rel0,Math.ceil(15-durMs/60000)), hi=Math.max(rel0,24*60-15);
-        const base={ evt, originDayIndex:di, rel0, durMs, startX:e.clientX, startY:e.clientY };
+        const durMs=en-s, durMin=durMs/60000, keep=Math.min(15,durMin);
+        // Dragged either way, an event may cross midnight, but it keeps at least 15 min
+        // (all of it if shorter, or what it had) in the column under the pointer.
+        const lo=Math.min(rel0,Math.ceil(keep-durMin)), hi=Math.max(rel0,Math.floor(24*60-keep));
+        const base={ evt, originDayIndex:di, rel0, secMs:s.getSeconds()*1000+s.getMilliseconds(), durMs,
+                     startX:e.clientX, startY:e.clientY, scrollTop:ref.current?ref.current.scrollTop:0 };
         let cur={...base,dayIndex:di,rel:rel0,moved:false};
+        dragPointer.current=pid;
         setDrag(cur);
         const move=ev=>{
+          if(ev.pointerId!==pid) return;
           if(!cur.moved && Math.abs(ev.clientX-base.startX)<4 && Math.abs(ev.clientY-base.startY)<4) return;
           ev.preventDefault();
           document.body.style.cursor='grabbing'; document.body.style.userSelect='none';
-          const deltaMin=Math.round(((ev.clientY-base.startY)/HOUR_H*60)/15)*15;
+          const el=ref.current;
+          // Scrolling the grid mid-drag moves the slot under the pointer too.
+          const dy=ev.clientY-base.startY+(el?el.scrollTop-base.scrollTop:0);
+          const deltaMin=Math.round((dy/HOUR_H*60)/15)*15;
           const rel=Math.max(lo,Math.min(hi,base.rel0+deltaMin));
           let dayIndex=base.originDayIndex;
-          const el=ref.current;
           if(el && days.length>1){
             const r=el.getBoundingClientRect();
             const colW=(el.clientWidth-52)/days.length; // clientWidth excludes the scrollbar
             dayIndex=Math.max(0,Math.min(days.length-1,Math.floor((ev.clientX-r.left-52)/colW)));
           }
+          if(cur.moved && dayIndex===cur.dayIndex && rel===cur.rel) return; // same slot: nothing to re-render
           cur={...base,dayIndex,rel,moved:true};
           setDrag(cur);
         };
@@ -793,6 +803,7 @@
           window.removeEventListener('pointerup',up);
           window.removeEventListener('pointercancel',cancel);
           document.body.style.cursor=''; document.body.style.userSelect='';
+          dragPointer.current=null;
           if(!cancelled && cur.moved){
             suppressClick.current=Date.now();
             const { start, end }=dragTimes(cur);
@@ -800,8 +811,8 @@
           }
           setDrag(null);
         };
-        const up=()=>finish(false);
-        const cancel=()=>finish(true);
+        const up=ev=>{ if(ev.pointerId===pid) finish(false); };
+        const cancel=ev=>{ if(ev.pointerId===pid) finish(true); };
         window.addEventListener('pointermove',move);
         window.addEventListener('pointerup',up);
         window.addEventListener('pointercancel',cancel);
@@ -878,7 +889,7 @@
                         const area=getEventArea(evt,categories);
                         const dragging=!!evt._drag;
                         return (
-                          <div key={evt.id} style={{...evStyle(sg,col,lay[evt.id],dragging,!!onEventDrop),...(dragging?{pointerEvents:'none'}:null)}}
+                          <div key={evt.id} style={{...evStyle(sg,col,lay[evt.id],dragging),...(dragging?{pointerEvents:'none'}:null)}}
                                onPointerDown={dragging?undefined:e=>onEventDown(e,evt,di)}
                                onClick={e=>{ e.stopPropagation(); if(Date.now()-suppressClick.current<300) return; onEventClick(evt); }}>
                             <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>
@@ -1452,8 +1463,9 @@
       function eventDeleted(id){ setEvts(es=>es.filter(e=>e.id!==id)); setModal(null); }
       // Drag-to-reschedule: optimistically move the event, PUT the new times, roll back on failure.
       async function eventMoved(evt, start, end){
+        // Compare instants: the server writes "…:00Z", toISOString "…:00.000Z".
+        if(new Date(evt.start_time).getTime()===start.getTime() && new Date(evt.end_time).getTime()===end.getTime()) return;
         const startISO=start.toISOString(), endISO=end.toISOString();
-        if(evt.start_time===startISO && evt.end_time===endISO) return;
         setEvts(es=>es.map(e=>e.id===evt.id?{...e,start_time:startISO,end_time:endISO}:e));
         try{
           const saved=await api(`/events/${evt.id}`,{method:'PUT',body:JSON.stringify({start_time:startISO,end_time:endISO})});
