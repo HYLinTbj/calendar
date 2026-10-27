@@ -85,30 +85,18 @@ func TestWeeklyStats_Endpoint(t *testing.T) {
 	assert.Equal(t, 120, stats.Areas[0].WeeklyTargetMinutes)
 	assert.Equal(t, []int{45, 15}, stats.Areas[0].Minutes)
 
-	// Defaults: Monday weeks, UTC, the 8 weeks up to now, whole but for this one.
-	w = Do(t, testRouter, "GET", "/events/stats/weekly", token, nil)
+	// Defaults: to is now, Monday weeks, UTC.
+	from = time.Now().UTC().AddDate(0, 0, -14)
+	w = Do(t, testRouter, "GET", "/events/stats/weekly?from="+from.Format(time.RFC3339), token, nil)
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 	stats = model.WeeklyStats{}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&stats))
 	assert.Equal(t, 1, stats.WeekStart)
 	assert.Equal(t, "UTC", stats.TZ)
-	require.Len(t, stats.Weeks, 8)
+	assert.WithinDuration(t, time.Now(), stats.To, time.Minute)
 	first, err := model.ParseDate(string(stats.Weeks[0]))
 	require.NoError(t, err)
 	assert.Equal(t, time.Monday, first.Weekday())
-	assert.True(t, stats.From.Equal(first), "from %s, first week %s", stats.From, stats.Weeks[0])
-
-	// Without from, the range starts at local midnight on a week's first day, here
-	// before the DST change that to is after.
-	to = time.Date(2026, 11, 5, 15, 0, 0, 0, time.UTC) // Thursday
-	w = Do(t, testRouter, "GET", "/events/stats/weekly?tz=America/Toronto&week_start=0&to="+to.Format(time.RFC3339), token, nil)
-	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
-	stats = model.WeeklyStats{}
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&stats))
-	require.Len(t, stats.Weeks, 8)
-	assert.Equal(t, model.Date("2026-09-13"), stats.Weeks[0])
-	assert.Equal(t, model.Date("2026-11-01"), stats.Weeks[7])
-	assert.True(t, stats.From.Equal(time.Date(2026, 9, 13, 4, 0, 0, 0, time.UTC)), "from %s", stats.From) // EDT midnight
 }
 
 func TestWeeklyStats_Validation(t *testing.T) {
@@ -127,20 +115,23 @@ func TestWeeklyStats_Validation(t *testing.T) {
 		"bad tz":             ok + "&tz=Not/AZone",
 		"empty range":        rng(from, from),
 		"from after to":      rng(from, from.AddDate(0, 0, -7)),
-		"over 53 weeks":      rng(from, from.AddDate(0, 0, 53*7+1)) + "&week_start=0",
-		"54 weeks touched":   rng(from, from.AddDate(0, 0, 53*7)), // from is a Sunday: Monday weeks
+		"over 54 weeks":      rng(from, from.AddDate(0, 0, 54*7+1)) + "&week_start=0",
+		"55 weeks touched":   rng(from, from.AddDate(0, 0, 54*7)), // from is a Sunday: Monday weeks
 		"bad from":           "from=yesterday",
+		"no from":            "to=" + from.Format(time.RFC3339),
 	} {
 		w := Do(t, testRouter, "GET", "/events/stats/weekly?"+query, token, nil)
 		assert.Equal(t, http.StatusBadRequest, w.Code, "%s: %s", name, w.Body.String())
 	}
 
-	w := Do(t, testRouter, "GET", "/events/stats/weekly?"+rng(from, from.AddDate(0, 0, 53*7))+"&week_start=0", token, nil)
-	assert.Equal(t, http.StatusOK, w.Code, "53 weeks: %s", w.Body.String())
-	// 53 local weeks across three DST changes are an hour over 53×7 days.
-	toronto := rng(time.Date(2025, 11, 2, 4, 0, 0, 0, time.UTC), time.Date(2026, 11, 8, 5, 0, 0, 0, time.UTC))
+	// 2028 runs Saturday to Sunday, so it touches 54 Sunday weeks.
+	year := rng(time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC))
+	w := Do(t, testRouter, "GET", "/events/stats/weekly?"+year+"&week_start=0", token, nil)
+	assert.Equal(t, http.StatusOK, w.Code, "2028: %s", w.Body.String())
+	// 54 local weeks across three DST changes are an hour over 54×7 days.
+	toronto := rng(time.Date(2025, 11, 2, 4, 0, 0, 0, time.UTC), time.Date(2026, 11, 15, 5, 0, 0, 0, time.UTC))
 	w = Do(t, testRouter, "GET", "/events/stats/weekly?"+toronto+"&tz=America/Toronto&week_start=0", token, nil)
-	assert.Equal(t, http.StatusOK, w.Code, "53 Toronto weeks: %s", w.Body.String())
+	assert.Equal(t, http.StatusOK, w.Code, "54 Toronto weeks: %s", w.Body.String())
 
 	w = Do(t, testRouter, "GET", "/events/stats/weekly", "", nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)

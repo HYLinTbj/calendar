@@ -560,21 +560,23 @@ func (h *EventHandler) Stats(c *gin.Context) {
 	respondStats(c, stats, err)
 }
 
-// weeklyStatsDefaultWeeks is how many weeks GET /events/stats/weekly covers when from
-// is omitted: as many as an Area card's trend shows (TREND_WEEKS in Calendar.html).
-const weeklyStatsDefaultWeeks = 8
-
 // WeeklyStats is Stats split into weeks: GET /events/stats/weekly?from=&to=&tz=&week_start=
 // gives each Area's minutes per week (of local days in tz, starting on week_start,
-// Sun=0 … Sat=6, default Monday) over [from, to). to defaults to now, and from to the
-// start of the last weeklyStatsDefaultWeeks weeks up to to, so none is partial but
-// the one to ends in. The range may touch at most repository.MaxWeeklyStatsWeeks weeks.
+// Sun=0 … Sat=6, default Monday) over [from, to). from is required, to defaults to
+// now. The range may touch at most repository.MaxWeeklyStatsWeeks weeks.
 func (h *EventHandler) WeeklyStats(c *gin.Context) {
 	ownerID := c.MustGet(middleware.UserIDKey).(uuid.UUID)
-	ctx := c.Request.Context()
 
-	f, t, ok := parseRange(c)
+	if c.Query("from") == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' is required"})
+		return
+	}
+	from, to, ok := statsRange(c, 0) // from is given: no default
 	if !ok {
+		return
+	}
+	if !from.Before(to) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' must be before 'to'"})
 		return
 	}
 	tz, ok := statsTZ(c)
@@ -590,27 +592,8 @@ func (h *EventHandler) WeeklyStats(c *gin.Context) {
 		}
 		weekStart = n
 	}
-	to := time.Now()
-	if t != nil {
-		to = *t
-	}
-	var from time.Time
-	if f != nil {
-		from = *f
-	} else {
-		var err error
-		from, err = h.repo.LastWeeksStart(ctx, to, tz, weekStart, weeklyStatsDefaultWeeks)
-		if err != nil {
-			respondStats(c, nil, err)
-			return
-		}
-	}
-	if !from.Before(to) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "'from' must be before 'to'"})
-		return
-	}
 
-	stats, err := h.repo.WeeklyStats(ctx, ownerID, from, to, tz, weekStart)
+	stats, err := h.repo.WeeklyStats(c.Request.Context(), ownerID, from, to, tz, weekStart)
 	if errors.Is(err, repository.ErrTooManyWeeks) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "the range may touch at most " + strconv.Itoa(repository.MaxWeeklyStatsWeeks) + " weeks"})
 		return
