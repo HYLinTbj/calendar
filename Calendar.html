@@ -1495,7 +1495,9 @@
           .then(d=>{ if(n===tracesReq.current) setTraces(d||[]); })
           .catch(()=>{ if(n===tracesReq.current) setTraces([]); });
       }
-      React.useEffect(loadEvents,[view,date,calendars,selCals]);
+      // Keyed on the calendars' ids: a rename or recolor changes no events.
+      const calIds=calendars.map(c=>c.id).sort().join();
+      React.useEffect(loadEvents,[view,date,calIds,selCals]);
 
       function navigate(dir) {
         setDate(d=>{ const n=new Date(d);
@@ -1534,10 +1536,12 @@
         if(calModal==='new') setSel(s=>new Set([...s,c.id]));
         setCalModal(null);
       }
-      // Its events now belong to the default calendar; the calendars change refetches them.
+      // Its events now belong to the default calendar, and the change of ids refetches
+      // them. If it was shown, show the default too, or its events would seem deleted.
       function calDeleted(id){
+        const def=calendars.find(c=>c.is_default);
         setCals(cs=>cs.filter(c=>c.id!==id));
-        setSel(s=>{ const n=new Set(s); n.delete(id); return n; });
+        setSel(s=>{ const n=new Set(s); if(n.delete(id) && def) n.add(def.id); return n; });
         setCalModal(null);
       }
       function catSaved(cat){ setCats(cs=>{ const i=cs.findIndex(c=>c.id===cat.id); return i>=0?[...cs.slice(0,i),cat,...cs.slice(i+1)]:[...cs,cat]; }); }

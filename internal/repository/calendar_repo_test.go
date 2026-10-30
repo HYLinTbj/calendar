@@ -5,6 +5,7 @@ package repository_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hylin/calendar/internal/model"
 	"github.com/hylin/calendar/internal/repository"
@@ -161,6 +162,44 @@ func TestCalendarRepository_Delete_MovesEventsToDefault(t *testing.T) {
 	got, err := eventRepo.GetByID(ctx, ev.ID, user.ID)
 	require.NoError(t, err)
 	assert.Equal(t, def.ID, got.CalendarID)
+}
+
+// A calendar made the default while Delete runs (say, from another tab) is kept.
+// Delete checks is_default before its transaction, so its DELETE checks again.
+func TestCalendarRepository_Delete_KeepsCalendarMadeDefaultMeanwhile(t *testing.T) {
+	truncateAll(t, testPool)
+	user := seedUser(t, testPool, "f2")
+	def := seedDefaultCalendar(t, testPool, user.ID)
+	cal := seedCalendar(t, testPool, user.ID, "Soon default")
+	ev := seedEvent(t, testPool, user.ID, cal.ID, "Stays put")
+	r := repository.NewCalendarRepository(testPool)
+	ctx := context.Background()
+
+	// Switch the default as Update does, but hold the commit until Delete waits on it.
+	tx, err := testPool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `UPDATE calendars SET is_default = false WHERE id = $1`, def.ID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `UPDATE calendars SET is_default = true WHERE id = $1`, cal.ID)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- r.Delete(ctx, cal.ID, user.ID) }()
+	require.Eventually(t, func() bool {
+		var waiting int
+		_ = testPool.QueryRow(ctx, `SELECT count(*) FROM pg_locks WHERE NOT granted`).Scan(&waiting)
+		return waiting > 0
+	}, 10*time.Second, 20*time.Millisecond, "Delete should block on the calendar row")
+	require.NoError(t, tx.Commit(ctx))
+
+	assert.ErrorIs(t, <-done, repository.ErrDeleteDefault)
+	got, err := r.GetByID(ctx, cal.ID, user.ID)
+	require.NoError(t, err)
+	assert.True(t, got.IsDefault)
+	moved, err := repository.NewEventRepository(testPool).GetByID(ctx, ev.ID, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, cal.ID, moved.CalendarID, "the move to the old default rolled back")
 }
 
 func TestCalendarRepository_Delete_DefaultReturnsError(t *testing.T) {
