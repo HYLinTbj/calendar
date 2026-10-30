@@ -336,6 +336,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 		-- Stats read one user's events by start time.
 		CREATE INDEX IF NOT EXISTS events_owner_start_idx ON events (owner_id, start_time);
+
+		-- Calendars get a colour (model.DefaultCalendarColor, the UI's accent, until set).
+		ALTER TABLE calendars ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT '#4f46e5';
 	`)
 	if err != nil {
 		return err
