@@ -691,22 +691,34 @@
       },[days,events]);
       const hasAllDay=Object.values(allDayByDay).some(a=>a.length>0);
 
-      // Where a drag puts the event: rel minutes after midnight of the column under the
-      // pointer (negative when it starts the day before), keeping the start's seconds and
-      // the duration. One setHours call: setHours(0) then setMinutes would land an hour
-      // late on a day whose midnight DST skips (Santiago), where setHours(0) gives 01:00.
-      function dragTimes(d) {
-        let start=new Date(days[d.dayIndex]); start.setHours(0,d.rel,0,d.secMs);
+      // rel minutes after midnight of column dayIndex (negative: the day before), plus
+      // secMs. One setHours call: setHours(0) then setMinutes would land an hour late on
+      // a day whose midnight DST skips (Santiago), where setHours(0) gives 01:00.
+      function atColumn(dayIndex, rel, secMs=0, offset) {
+        let t=new Date(days[dayIndex]); t.setHours(0,rel,0,secMs);
         // In the hour that repeats when clocks go back, setHours picks the first one;
-        // keep the offset the event had, so one at the second 01:30 stays there.
-        const alt=new Date(start.getTime()+(d.offset-start.getTimezoneOffset())*60000);
-        if(alt.getHours()===start.getHours() && alt.getMinutes()===start.getMinutes()) start=alt;
+        // keep the offset the time had, so one at the second 01:30 stays there.
+        if(offset!==undefined){
+          const alt=new Date(t.getTime()+(offset-t.getTimezoneOffset())*60000);
+          if(alt.getHours()===t.getHours() && alt.getMinutes()===t.getMinutes()) t=alt;
+        }
+        return t;
+      }
+      // Where a drag puts the event. A move puts the start at rel in the column under the
+      // pointer, keeping its seconds and the duration. A resize keeps the start and puts
+      // the end at rel, unless rel is back where it began. A create spans the quarter-hours
+      // from the one pressed (rel0) to the one under the pointer.
+      function dragTimes(d) {
+        if(d.kind==='resize') return { start:new Date(d.evt.start_time),
+          end:d.rel===d.rel0?new Date(d.evt.end_time):atColumn(d.dayIndex,d.rel,0,d.offset) };
+        if(d.kind==='create') return { start:atColumn(d.dayIndex,Math.min(d.rel0,d.rel)), end:atColumn(d.dayIndex,Math.max(d.rel0,d.rel)+15) };
+        const start=atColumn(d.dayIndex,d.rel,d.secMs,d.offset);
         return { start, end:new Date(start.getTime()+d.durMs) };
       }
-      // Apply the in-progress drag as a preview: pull the dragged event out of every
-      // day and put a moved clone in each day it now covers.
+      // Apply the in-progress move or resize as a preview: pull the dragged event out of
+      // every day and put a changed clone in each day it now covers.
       const renderByDay=React.useMemo(()=>{
-        if(!drag) return byDay;
+        if(!drag || drag.kind==='create') return byDay;
         const m={}; for(const key in byDay) m[key]=byDay[key].filter(sg=>sg.evt.id!==drag.evt.id);
         const { start, end }=dragTimes(drag);
         const evt={...drag.evt,start_time:start.toISOString(),end_time:end.toISOString(),_drag:true};
@@ -742,10 +754,11 @@
       function evStyle(sg,col,pos,dragging) {
         const s=sg.start, en=sg.end;
         const dur=Math.max((en-s)/60000,30);
-        const height=Math.max(dur*(HOUR_H/60)-2,20);
-        // A segment ends by midnight, but the 30-min minimum can still push a late one
-        // past the bottom of the day; nudge it up instead so it stays readable.
-        const top=Math.min((s.getHours()*60+s.getMinutes())*(HOUR_H/60), 24*HOUR_H-height);
+        // Drawn at its real start. A segment ends by midnight, but the 30-min minimum
+        // would push a late one past the bottom of the day, so it gets only the room left
+        // (13px for one at 23:45).
+        const top=(s.getHours()*60+s.getMinutes())*(HOUR_H/60);
+        const height=Math.min(Math.max(dur*(HOUR_H/60)-2,20), 24*HOUR_H-top-2);
         const w=100/pos.cols;
         // Square the corners where the event continues from/into the neighbouring day.
         const rTop=sg.before?0:5, rBottom=sg.after?0:5;
@@ -753,7 +766,7 @@
         // spilled past the day column's right border.
         return { position:'absolute',top,height,
                  left:`calc(${pos.col*w}% + 2px)`,width:`calc(${w}% - 6px)`,boxSizing:'border-box',
-                 background:col,borderRadius:`${rTop}px ${rTop}px ${rBottom}px ${rBottom}px`,padding:'2px 6px',overflow:'hidden',
+                 background:col,borderRadius:`${rTop}px ${rTop}px ${rBottom}px ${rBottom}px`,padding:height<24?'0 6px':'2px 6px',overflow:'hidden',
                  cursor:dragging?'grabbing':onEventDrop?'grab':'pointer',color:'#fff',fontSize:11,fontWeight:500,
                  zIndex:dragging?5:1,opacity:dragging?0.95:1,
                  boxShadow:dragging?'0 6px 16px rgba(0,0,0,0.28)':'none',
@@ -761,46 +774,88 @@
                  touchAction:'none',userSelect:'none',WebkitUserSelect:'none' };
       }
 
-      // Pointer-drag an event to reschedule it: vertical = 15-min steps, horizontal
-      // = day columns (week view). Moving past a small threshold suppresses the click
-      // so it reschedules instead of opening the editor; the drop preserves duration.
-      // Any piece of an event crossing midnight can be grabbed to move all of it.
-      function onEventDown(e, evt, di) {
+      // Pointer drags on the grid, in 15-min steps. Moving past a small threshold
+      // suppresses the click, so a drag never also opens the editor.
+      //   'move'   an event: vertical = time, horizontal = day columns (week view); the
+      //            drop keeps the duration. Any piece of an event crossing midnight can
+      //            be grabbed to move all of it.
+      //   'resize' an event's end, by the handle on its last piece, within that column.
+      //   'create' a new event, swept from an empty slot within one column; the editor
+      //            opens with that range.
+      function startDrag(e, kind, evt, di) {
         // One drag at a time: a second finger neither starts another nor steers this one.
-        if(e.button!==0 || evt.all_day || !onEventDrop || endDrag.current) return;
-        const pid=e.pointerId, el=ref.current;
-        const s=new Date(evt.start_time), en=new Date(evt.end_time);
-        // The start in minutes after the grabbed column's midnight: negative when the
-        // piece grabbed continues from the day before.
-        const col=new Date(days[di]); col.setHours(0,0,0,0);
-        const startDay=new Date(s); startDay.setHours(0,0,0,0);
-        const rel0=s.getHours()*60+s.getMinutes()-Math.round((col-startDay)/864e5)*24*60;
-        const durMs=en-s, durMin=durMs/60000;
-        // Dragged either way, an event may cross midnight, but it keeps at least 15 min
-        // (all of it if shorter, or what it had) in the column under the pointer.
-        const lo=Math.min(rel0,Math.ceil(Math.min(15,durMin)-durMin)), hi=Math.max(rel0,24*60-15);
-        const base={ evt, originDayIndex:di, rel0, secMs:s.getSeconds()*1000+s.getMilliseconds(),
-                     offset:s.getTimezoneOffset(), durMs, startX:e.clientX, startY:e.clientY, scrollTop:el?el.scrollTop:0 };
-        let cur={...base,dayIndex:di,rel:rel0,moved:false};
+        const el=ref.current;
+        if(e.button!==0 || endDrag.current || !el) return;
+        // A touch on an empty slot scrolls the grid (a tap still creates an event).
+        if(kind==='create' ? !onSlotClick || e.pointerType==='touch' : evt.all_day || !onEventDrop) return;
+        const pid=e.pointerId;
+        const base={ kind, evt, originDayIndex:di, startX:e.clientX, startY:e.clientY, scrollTop:el.scrollTop };
+        let place; // (dy, x) → { dayIndex, rel }: where the pointer puts the drag
+        if(kind==='create'){
+          const at0=(e.clientY-el.getBoundingClientRect().top+el.scrollTop)/HOUR_H*60;
+          const quarter=m=>Math.max(0,Math.min(24*60-15,Math.floor(m/15)*15));
+          base.rel0=quarter(at0);
+          place=dy=>({ dayIndex:di, rel:quarter(at0+dy/HOUR_H*60) });
+        } else {
+          const s=new Date(evt.start_time), en=new Date(evt.end_time), durMin=(en-s)/60000;
+          // Minutes from the grabbed column's midnight to t: negative the day before,
+          // 1440 at the next midnight.
+          const col=new Date(days[di]); col.setHours(0,0,0,0);
+          const relOf=t=>{ const d=new Date(t); d.setHours(0,0,0,0); return t.getHours()*60+t.getMinutes()+Math.round((d-col)/864e5)*24*60; };
+          if(kind==='move'){
+            const rel0=relOf(s);
+            // Dragged either way, an event may cross midnight, but it keeps at least 15 min
+            // (all of it if shorter, or what it had) in the column under the pointer.
+            const lo=Math.min(rel0,Math.ceil(Math.min(15,durMin)-durMin)), hi=Math.max(rel0,24*60-15);
+            Object.assign(base,{ rel0, secMs:s.getSeconds()*1000+s.getMilliseconds(), offset:s.getTimezoneOffset(), durMs:en-s });
+            place=(dy,x)=>{
+              const rel=Math.max(lo,Math.min(hi,rel0+Math.round((dy/HOUR_H*60)/15)*15));
+              let dayIndex=di;
+              if(days.length>1){
+                const r=el.getBoundingClientRect();
+                const colW=(el.clientWidth-52)/days.length; // clientWidth excludes the scrollbar
+                dayIndex=Math.max(0,Math.min(days.length-1,Math.floor((x-r.left-52)/colW)));
+              }
+              return { dayIndex, rel };
+            };
+          } else {
+            // The end goes to the quarter-hour nearest the pointer, between 00:15 and 24:00
+            // of this column and at least min(15 min, duration) after the start. Within
+            // half a step of where it began it stays put, so a drag back changes nothing.
+            const rel0=relOf(en);
+            const lo=Math.min(rel0,Math.max(15,Math.ceil((relOf(s)+Math.min(15,durMin))/15)*15));
+            Object.assign(base,{ rel0, offset:en.getTimezoneOffset() });
+            place=dy=>{
+              const m=dy/HOUR_H*60;
+              return { dayIndex:di, rel:Math.abs(m)<7.5?rel0:Math.max(lo,Math.min(24*60,Math.round((rel0+m)/15)*15)) };
+            };
+          }
+        }
+        let cur={...base,dayIndex:di,rel:base.rel0,moved:false};
         let x=base.startX, y=base.startY; // where the pointer last was
+        // Near the grid's top or bottom edge, or past it, scroll the grid, faster the
+        // closer the pointer is; the scroll listener then moves the drag along. A finger
+        // dragging an event can't scroll the grid itself (touchAction:none).
+        const EDGE=40, MAX_STEP=14; // px from the edge where scrolling starts; px per frame
+        let raf=0;
+        const edgeScroll=()=>{
+          const top=el.getBoundingClientRect().top, bottom=top+el.clientHeight;
+          const over=y<top+EDGE ? y-(top+EDGE) : y>bottom-EDGE ? y-(bottom-EDGE) : 0;
+          if(over) el.scrollTop+=Math.sign(over)*Math.max(1,Math.round(Math.min(1,Math.abs(over)/EDGE)*MAX_STEP));
+          raf=requestAnimationFrame(edgeScroll);
+        };
         // Follow the pointer, counting any scrolling of the grid since the drag began.
         const update=()=>{
-          const dy=y-base.startY+(el?el.scrollTop-base.scrollTop:0);
+          const dy=y-base.startY+el.scrollTop-base.scrollTop;
           if(!cur.moved && Math.abs(x-base.startX)<4 && Math.abs(dy)<4) return;
           if(!cur.moved){
-            document.body.style.cursor='grabbing'; document.body.style.userSelect='none';
+            document.body.style.cursor=kind==='move'?'grabbing':'ns-resize'; document.body.style.userSelect='none';
             // The grid takes the pointer's events from here on: the piece grabbed may be
             // redrawn in another column, and the release must still reach us.
-            try { if(el) el.setPointerCapture(pid); } catch {}
+            try { el.setPointerCapture(pid); } catch {}
+            raf=requestAnimationFrame(edgeScroll);
           }
-          const deltaMin=Math.round((dy/HOUR_H*60)/15)*15;
-          const rel=Math.max(lo,Math.min(hi,base.rel0+deltaMin));
-          let dayIndex=base.originDayIndex;
-          if(el && days.length>1){
-            const r=el.getBoundingClientRect();
-            const colW=(el.clientWidth-52)/days.length; // clientWidth excludes the scrollbar
-            dayIndex=Math.max(0,Math.min(days.length-1,Math.floor((x-r.left-52)/colW)));
-          }
+          const { dayIndex, rel }=place(dy,x);
           if(cur.moved && dayIndex===cur.dayIndex && rel===cur.rel) return; // same slot: nothing to re-render
           cur={...base,dayIndex,rel,moved:true};
           setDrag(cur);
@@ -819,14 +874,15 @@
           window.removeEventListener('pointermove',move);
           window.removeEventListener('pointerup',up);
           window.removeEventListener('pointercancel',cancel);
-          if(el) el.removeEventListener('scroll',update);
+          el.removeEventListener('scroll',update);
+          cancelAnimationFrame(raf);
           document.body.style.cursor=''; document.body.style.userSelect='';
           endDrag.current=null;
           if(!cur.moved) return;
           if(!cancelled){
             suppressClick.current=Date.now();
             const { start, end }=dragTimes(cur);
-            onEventDrop(base.evt, start, end);
+            if(kind==='create') onSlotClick(start, end); else onEventDrop(base.evt, start, end);
           }
           setDrag(null);
         };
@@ -836,7 +892,7 @@
         window.addEventListener('pointermove',move);
         window.addEventListener('pointerup',up);
         window.addEventListener('pointercancel',cancel);
-        if(el) el.addEventListener('scroll',update);
+        el.addEventListener('scroll',update);
       }
 
       return (
@@ -897,7 +953,8 @@
                 const k=ymd(day);
                 const dayEvts=renderByDay[k]||[];
                 return (
-                  <div key={di} style={{flex:1,position:'relative',borderLeft:'1px solid var(--border)'}}>
+                  <div key={di} style={{flex:1,position:'relative',borderLeft:'1px solid var(--border)',userSelect:'none'}}
+                       onPointerDown={e=>startDrag(e,'create',null,di)}>
                     {HOURS.map(h=>(
                       <div key={h} style={{position:'absolute',top:h*HOUR_H,left:0,right:0,height:HOUR_H,borderTop:'1px solid var(--border)',cursor:'pointer'}}
                            onClick={()=>{ if(Date.now()-suppressClick.current<300) return; const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
@@ -909,19 +966,34 @@
                         const col=getEventColor(evt,calendars,categories);
                         const area=getEventArea(evt,categories);
                         const dragging=!!evt._drag;
+                        const st=evStyle(sg,col,lay[evt.id],dragging);
                         return (
-                          <div key={evt.id} style={evStyle(sg,col,lay[evt.id],dragging)}
-                               onPointerDown={e=>onEventDown(e,evt,di)}
+                          <div key={evt.id} style={st}
+                               onPointerDown={e=>{ e.stopPropagation(); startDrag(e,'move',evt,di); }}
                                onClick={e=>{ e.stopPropagation(); if(Date.now()-suppressClick.current<300) return; onEventClick(evt); }}>
                             <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>
                               {area?.code&&<span style={{marginRight:4}}><AreaBadge area={area} onColor size={9}/></span>}<SeriesMark evt={evt}/>{evt.title}
                             </div>
                             <div style={{opacity:0.85,fontSize:10}}>{sg.before
                               ? (sg.after ? `from ${fmtTime(evt.start_time)}` : `until ${fmtTime(evt.end_time)}`)
-                              : fmtTime(evt.start_time)}</div>
+                              : dragging ? `${fmtTime(evt.start_time)} – ${fmtTime(evt.end_time)}` : fmtTime(evt.start_time)}</div>
+                            {/* Resize handle: the bottom edge of the piece where the event ends. */}
+                            {!sg.after&&onEventDrop&&<div onPointerDown={e=>{ e.stopPropagation(); startDrag(e,'resize',evt,di); }}
+                              style={{position:'absolute',left:0,right:0,bottom:0,height:Math.min(8,Math.round(st.height/3)),cursor:'ns-resize'}}/>}
                           </div>
                         );
                       });
+                    })()}
+                    {drag&&drag.kind==='create'&&drag.dayIndex===di&&(()=>{
+                      const a=Math.min(drag.rel0,drag.rel), b=Math.max(drag.rel0,drag.rel)+15;
+                      const { start, end }=dragTimes(drag);
+                      return (
+                        <div style={{position:'absolute',top:a*(HOUR_H/60),height:(b-a)*(HOUR_H/60)-2,left:2,right:4,zIndex:5,
+                          background:'var(--accent)',opacity:0.75,color:'#fff',borderRadius:5,padding:'2px 6px',boxSizing:'border-box',
+                          fontSize:10,fontWeight:500,overflow:'hidden',whiteSpace:'nowrap',pointerEvents:'none',boxShadow:'0 6px 16px rgba(0,0,0,0.2)'}}>
+                          {fmtTime(start)} – {fmtTime(end)}
+                        </div>
+                      );
                     })()}
                     {sameDay(day,today)&&<NowLine/>}
                   </div>
@@ -977,7 +1049,7 @@
     // ─────────────────────────────────────────────
     // EVENT MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function EventModal({ event, defaultDate, calendars, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
+    function EventModal({ event, defaultDate, defaultEnd, calendars, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
       const isEdit = !!event?.id;
       const isRecurring = isEdit && !!event.recurring_event_id;
       // Edited on its own: no longer linked, but still part of its series, so it can delete
@@ -989,7 +1061,8 @@
         if(defaultDate){ const d=new Date(defaultDate); d.setSeconds(0,0); return d; }
         const d=new Date(); d.setMinutes(0,0,0); return d;
       },[]);
-      const defEnd = React.useMemo(()=>{ const d=new Date(defStart); d.setHours(d.getHours()+1); return d; },[defStart]);
+      // A range swept on the grid gives its own end; otherwise an hour.
+      const defEnd = React.useMemo(()=>{ if(defaultEnd) return new Date(defaultEnd); const d=new Date(defStart); d.setHours(d.getHours()+1); return d; },[defStart]);
 
       // All-day events are stored as UTC midnight..23:59:59Z, so read their dates in UTC
       // (as evtKey does) — the local date is a day off in any non-UTC timezone, and
@@ -1420,7 +1493,7 @@
       const tracesReq = React.useRef(0); // number of the latest traces request
       const [hiddenAreas,setHiddenAreas]=React.useState(()=>loadHiddenAreas(user?.id));
       const [selCals,setSel] = React.useState(new Set());
-      const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
+      const [modal,setModal] = React.useState(null);   // { event?, defaultDate?, defaultEnd? }
       const [newCal,setNewCal]= React.useState(false);
       const [areaModal,setAreaModal]=React.useState(null); // {groupId} for new | area | null
       const [groupModal,setGroupModal]=React.useState(null); // 'new' | group | null
@@ -1482,7 +1555,7 @@
       function toggleCal(id){ setSel(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; }); }
       function eventSaved(saved){ setEvts(es=>{ const i=es.findIndex(e=>e.id===saved.id); return i>=0?[...es.slice(0,i),saved,...es.slice(i+1)]:[...es,saved]; }); setModal(null); }
       function eventDeleted(id){ setEvts(es=>es.filter(e=>e.id!==id)); setModal(null); }
-      // Drag-to-reschedule: optimistically move the event, PUT the new times, roll back on failure.
+      // Drag to move or resize: optimistically change the event, PUT the new times, roll back on failure.
       async function eventMoved(evt, start, end){
         // Compare instants: the server writes "…:00Z", toISOString "…:00.000Z".
         if(new Date(evt.start_time).getTime()===start.getTime() && new Date(evt.end_time).getTime()===end.getTime()) return;
@@ -1495,7 +1568,7 @@
           // Roll back just this event's times so a concurrent change elsewhere
           // (another drag, a modal save) isn't reverted along with it.
           setEvts(es=>es.map(e=>e.id===evt.id?{...e,start_time:evt.start_time,end_time:evt.end_time}:e));
-          alert('Could not move event: '+ex.message);
+          alert('Could not reschedule event: '+ex.message);
         }
       }
       function calCreated(c){ setCals(cs=>[...cs,c]); setSel(s=>new Set([...s,c.id])); setNewCal(false); }
@@ -1551,12 +1624,12 @@
 
             <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               {view==='month'&&<MonthView currentDate={date} events={visible} calendars={calendars} categories={cats} onDayClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
-              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
-              {view==='day'&&<TimeGrid days={[date]} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='day'&&<TimeGrid days={[date]} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
             </div>
           </div>
 
-          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} defaultEnd={modal.defaultEnd} calendars={calendars} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
           {newCal&&<NewCalendarModal onSave={calCreated} onClose={()=>setNewCal(false)}/>}
           {areaModal&&<AreaModal area={areaModal.id?areaModal:null} defaultGroupId={areaModal.groupId} groups={groups} onClose={()=>setAreaModal(null)}
             onSaved={cat=>{ catSaved(cat); setAreaModal(null); }} onDeleted={catDeleted}/>}
