@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
@@ -16,35 +17,44 @@ func NewCalendarRepository(pool *pgxpool.Pool) *CalendarRepository {
 	return &CalendarRepository{pool: pool}
 }
 
-func (r *CalendarRepository) Create(ctx context.Context, ownerID uuid.UUID, name, description string) (*model.Calendar, error) {
+const calendarCols = `id, owner_id, name, description, color, is_default, created_at, updated_at`
+
+// calendarColsC is calendarCols for queries that alias calendars as c.
+const calendarColsC = `c.id, c.owner_id, c.name, c.description, c.color, c.is_default, c.created_at, c.updated_at`
+
+// scanCalendar scans calendarCols, then extra.
+func scanCalendar(row interface{ Scan(...any) error }, c *model.Calendar, extra ...any) error {
+	return row.Scan(append([]any{&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.Color, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt}, extra...)...)
+}
+
+// Create adds a calendar. A blank color gets model.DefaultCalendarColor.
+func (r *CalendarRepository) Create(ctx context.Context, ownerID uuid.UUID, req model.CreateCalendarRequest) (*model.Calendar, error) {
+	if strings.TrimSpace(req.Color) == "" {
+		req.Color = model.DefaultCalendarColor
+	}
 	var c model.Calendar
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO calendars (owner_id, name, description)
-		VALUES ($1, $2, $3)
-		RETURNING id, owner_id, name, description, is_default, created_at, updated_at
-	`, ownerID, name, description).
-		Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt)
+	err := scanCalendar(r.pool.QueryRow(ctx, `
+		INSERT INTO calendars (owner_id, name, description, color)
+		VALUES ($1, $2, $3, $4)
+		RETURNING `+calendarCols,
+		ownerID, req.Name, req.Description, req.Color), &c)
 	return &c, err
 }
 
 func (r *CalendarRepository) CreateDefault(ctx context.Context, ownerID uuid.UUID) (*model.Calendar, error) {
 	var c model.Calendar
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO calendars (owner_id, name, is_default)
-		VALUES ($1, 'My Calendar', true)
-		RETURNING id, owner_id, name, description, is_default, created_at, updated_at
-	`, ownerID).
-		Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt)
+	err := scanCalendar(r.pool.QueryRow(ctx, `
+		INSERT INTO calendars (owner_id, name, color, is_default)
+		VALUES ($1, 'My Calendar', $2, true)
+		RETURNING `+calendarCols,
+		ownerID, model.DefaultCalendarColor), &c)
 	return &c, err
 }
 
 func (r *CalendarRepository) GetByID(ctx context.Context, id, ownerID uuid.UUID) (*model.Calendar, error) {
 	var c model.Calendar
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, owner_id, name, description, is_default, created_at, updated_at
-		FROM calendars WHERE id = $1 AND owner_id = $2
-	`, id, ownerID).
-		Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt)
+	err := scanCalendar(r.pool.QueryRow(ctx,
+		`SELECT `+calendarCols+` FROM calendars WHERE id = $1 AND owner_id = $2`, id, ownerID), &c)
 	return &c, err
 }
 
@@ -58,13 +68,13 @@ func (r *CalendarRepository) GetByIDOrShared(ctx context.Context, id, userID uui
 	// Not the owner; check for a share
 	var c model.Calendar
 	var permission string
-	err = r.pool.QueryRow(ctx, `
-		SELECT c.id, c.owner_id, c.name, c.description, c.is_default, c.created_at, c.updated_at, cs.permission
+	err = scanCalendar(r.pool.QueryRow(ctx, `
+		SELECT `+calendarColsC+`, cs.permission
 		FROM calendars c
 		JOIN calendar_shares cs ON cs.calendar_id = c.id
 		WHERE c.id = $1 AND cs.shared_with_user_id = $2`,
 		id, userID,
-	).Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt, &permission)
+	), &c, &permission)
 	if err != nil {
 		return nil, "", err
 	}
@@ -73,17 +83,14 @@ func (r *CalendarRepository) GetByIDOrShared(ctx context.Context, id, userID uui
 
 func (r *CalendarRepository) GetDefault(ctx context.Context, ownerID uuid.UUID) (*model.Calendar, error) {
 	var c model.Calendar
-	err := r.pool.QueryRow(ctx, `
-		SELECT id, owner_id, name, description, is_default, created_at, updated_at
-		FROM calendars WHERE owner_id = $1 AND is_default = true
-	`, ownerID).
-		Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt)
+	err := scanCalendar(r.pool.QueryRow(ctx,
+		`SELECT `+calendarCols+` FROM calendars WHERE owner_id = $1 AND is_default = true`, ownerID), &c)
 	return &c, err
 }
 
 func (r *CalendarRepository) List(ctx context.Context, ownerID uuid.UUID) ([]model.Calendar, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, owner_id, name, description, is_default, created_at, updated_at
+		SELECT `+calendarCols+`
 		FROM calendars WHERE owner_id = $1
 		ORDER BY is_default DESC, created_at ASC
 	`, ownerID)
@@ -95,7 +102,7 @@ func (r *CalendarRepository) List(ctx context.Context, ownerID uuid.UUID) ([]mod
 	calendars := []model.Calendar{}
 	for rows.Next() {
 		var c model.Calendar
-		if err := rows.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := scanCalendar(rows, &c); err != nil {
 			return nil, err
 		}
 		calendars = append(calendars, c)
@@ -114,6 +121,9 @@ func (r *CalendarRepository) Update(ctx context.Context, id, ownerID uuid.UUID, 
 	if req.Description != nil {
 		current.Description = *req.Description
 	}
+	if req.Color != nil {
+		current.Color = *req.Color
+	}
 
 	// Switching the default requires unsetting the old one first (within a transaction).
 	if req.IsDefault != nil && *req.IsDefault && !current.IsDefault {
@@ -130,24 +140,22 @@ func (r *CalendarRepository) Update(ctx context.Context, id, ownerID uuid.UUID, 
 			return nil, err
 		}
 		var c model.Calendar
-		if err := tx.QueryRow(ctx, `
-			UPDATE calendars SET name=$1, description=$2, is_default=true, updated_at=NOW()
-			WHERE id=$3 AND owner_id=$4
-			RETURNING id, owner_id, name, description, is_default, created_at, updated_at
-		`, current.Name, current.Description, id, ownerID).
-			Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := scanCalendar(tx.QueryRow(ctx, `
+			UPDATE calendars SET name=$1, description=$2, color=$3, is_default=true, updated_at=NOW()
+			WHERE id=$4 AND owner_id=$5
+			RETURNING `+calendarCols,
+			current.Name, current.Description, current.Color, id, ownerID), &c); err != nil {
 			return nil, err
 		}
 		return &c, tx.Commit(ctx)
 	}
 
 	var c model.Calendar
-	err = r.pool.QueryRow(ctx, `
-		UPDATE calendars SET name=$1, description=$2, updated_at=NOW()
-		WHERE id=$3 AND owner_id=$4
-		RETURNING id, owner_id, name, description, is_default, created_at, updated_at
-	`, current.Name, current.Description, id, ownerID).
-		Scan(&c.ID, &c.OwnerID, &c.Name, &c.Description, &c.IsDefault, &c.CreatedAt, &c.UpdatedAt)
+	err = scanCalendar(r.pool.QueryRow(ctx, `
+		UPDATE calendars SET name=$1, description=$2, color=$3, updated_at=NOW()
+		WHERE id=$4 AND owner_id=$5
+		RETURNING `+calendarCols,
+		current.Name, current.Description, current.Color, id, ownerID), &c)
 	return &c, err
 }
 

@@ -18,11 +18,25 @@ func TestCalendarRepository_Create(t *testing.T) {
 	r := repository.NewCalendarRepository(testPool)
 	ctx := context.Background()
 
-	cal, err := r.Create(ctx, user.ID, "Work", "Work calendar")
+	cal, err := r.Create(ctx, user.ID, model.CreateCalendarRequest{Name: "Work", Description: "Work calendar", Color: "#059669"})
 	require.NoError(t, err)
 	assert.Equal(t, "Work", cal.Name)
+	assert.Equal(t, "#059669", cal.Color)
 	assert.Equal(t, user.ID, cal.OwnerID)
 	assert.False(t, cal.IsDefault)
+}
+
+func TestCalendarRepository_Create_BlankColorGetsDefault(t *testing.T) {
+	truncateAll(t, testPool)
+	user := seedUser(t, testPool, "a2")
+	r := repository.NewCalendarRepository(testPool)
+	ctx := context.Background()
+
+	for _, color := range []string{"", "  "} {
+		cal, err := r.Create(ctx, user.ID, model.CreateCalendarRequest{Name: "Work" + color, Color: color})
+		require.NoError(t, err)
+		assert.Equal(t, model.DefaultCalendarColor, cal.Color)
+	}
 }
 
 func TestCalendarRepository_CreateDefault(t *testing.T) {
@@ -35,6 +49,7 @@ func TestCalendarRepository_CreateDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, cal.IsDefault)
 	assert.Equal(t, "My Calendar", cal.Name)
+	assert.Equal(t, model.DefaultCalendarColor, cal.Color)
 }
 
 func TestCalendarRepository_GetByID(t *testing.T) {
@@ -70,15 +85,60 @@ func TestCalendarRepository_Update_SwitchDefault(t *testing.T) {
 	r := repository.NewCalendarRepository(testPool)
 	ctx := context.Background()
 
-	isDefault := true
-	updated, err := r.Update(ctx, newCal.ID, user.ID, model.UpdateCalendarRequest{IsDefault: &isDefault})
+	isDefault, color := true, "#dc2626"
+	updated, err := r.Update(ctx, newCal.ID, user.ID, model.UpdateCalendarRequest{IsDefault: &isDefault, Color: &color})
 	require.NoError(t, err)
 	assert.True(t, updated.IsDefault)
+	assert.Equal(t, color, updated.Color)
+	assert.Equal(t, "New Default", updated.Name)
 
 	// Old default should no longer be default
 	oldNow, err := r.GetByID(ctx, old.ID, user.ID)
 	require.NoError(t, err)
 	assert.False(t, oldNow.IsDefault)
+}
+
+func TestCalendarRepository_Update_RenameAndRecolor(t *testing.T) {
+	truncateAll(t, testPool)
+	user := seedUser(t, testPool, "e2")
+	cal := seedCalendar(t, testPool, user.ID, "Old")
+	r := repository.NewCalendarRepository(testPool)
+	ctx := context.Background()
+
+	name, color := "Renamed", "#7c3aed"
+	updated, err := r.Update(ctx, cal.ID, user.ID, model.UpdateCalendarRequest{Name: &name, Color: &color})
+	require.NoError(t, err)
+	assert.Equal(t, name, updated.Name)
+	assert.Equal(t, color, updated.Color)
+
+	got, err := r.GetByID(ctx, cal.ID, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, color, got.Color)
+
+	// Fields left out keep their values.
+	updated, err = r.Update(ctx, cal.ID, user.ID, model.UpdateCalendarRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, name, updated.Name)
+	assert.Equal(t, color, updated.Color)
+}
+
+func TestCalendarRepository_GetByIDOrShared_ReadsColor(t *testing.T) {
+	truncateAll(t, testPool)
+	owner := seedUser(t, testPool, "s1")
+	guest := seedUser(t, testPool, "s2")
+	r := repository.NewCalendarRepository(testPool)
+	ctx := context.Background()
+
+	cal, err := r.Create(ctx, owner.ID, model.CreateCalendarRequest{Name: "Shared", Color: "#0891b2"})
+	require.NoError(t, err)
+	_, err = repository.NewCalendarShareRepository(testPool).Create(ctx, cal.ID, owner.ID, guest.ID, "view")
+	require.NoError(t, err)
+
+	got, perm, err := r.GetByIDOrShared(ctx, cal.ID, guest.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "view", perm)
+	assert.Equal(t, "#0891b2", got.Color)
+	assert.Equal(t, "Shared", got.Name)
 }
 
 func TestCalendarRepository_Delete_MovesEventsToDefault(t *testing.T) {

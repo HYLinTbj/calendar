@@ -354,7 +354,7 @@
     // ─────────────────────────────────────────────
     // SIDEBAR
     // ─────────────────────────────────────────────
-    function Sidebar({ currentDate, onDateSelect, calendars, selCals, onToggleCal, categories, groups, hiddenAreas, onToggleAreas, eventDays, onNewEvent, onNewCalendar, onNewArea, onEditArea, onNewGroup, onEditGroup }) {
+    function Sidebar({ currentDate, onDateSelect, calendars, selCals, onToggleCal, categories, groups, hiddenAreas, onToggleAreas, eventDays, onNewEvent, onNewCalendar, onEditCalendar, onNewArea, onEditArea, onNewGroup, onEditGroup }) {
       return (
         <div style={{width:'var(--sidebar-width)',borderRight:'1px solid var(--border)',background:'#fff',display:'flex',flexDirection:'column',flexShrink:0,overflowY:'auto'}}>
           <div style={{padding:'16px 12px 0'}}>
@@ -385,6 +385,7 @@
                 </span>
                 <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{cal.name}</span>
                 {cal.is_default&&<span style={{fontSize:10,color:'var(--text-muted)'}}>default</span>}
+                <button onClick={e=>{ e.stopPropagation(); onEditCalendar(cal); }} style={{...S.iconBtn,fontSize:12,padding:'0 4px'}} title={`Edit calendar ${cal.name}`} aria-label={`Edit calendar ${cal.name}`}>✎</button>
               </div>
             ))}
           </div>
@@ -1363,42 +1364,66 @@
     }
 
     // ─────────────────────────────────────────────
-    // NEW CALENDAR MODAL
+    // CALENDAR MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function NewCalendarModal({ onSave, onClose }) {
-      const [name,setName]=React.useState('');
-      const [color,setColor]=React.useState(CALENDAR_COLORS[0]);
+    function CalendarModal({ calendar, calendars=[], onClose, onSaved, onDeleted }) {
+      const isEdit=!!calendar;
+      const [name,setName]=React.useState(calendar?.name||'');
+      const [color,setColor]=React.useState(()=>calendar?.color||CALENDAR_COLORS.find(c=>!calendars.some(x=>x.color===c))||CALENDAR_COLORS[0]);
+      const [makeDefault,setMakeDefault]=React.useState(false);
       const [busy,setBusy]=React.useState(false);
       const [err,setErr]=React.useState('');
+      const def=calendars.find(c=>c.is_default);
 
       async function save(e) {
         e.preventDefault(); if(!name.trim())return;
-        setBusy(true);
-        try{ const c=await api('/calendars',{method:'POST',body:JSON.stringify({name:name.trim(),color})}); onSave(c); }
-        catch(ex){setErr(ex.message);setBusy(false);}
+        setBusy(true); setErr('');
+        try {
+          const body={ name:name.trim(), color };
+          if(makeDefault) body.is_default=true;
+          const saved = isEdit
+            ? await api(`/calendars/${calendar.id}`,{method:'PUT',body:JSON.stringify(body)})
+            : await api('/calendars',{method:'POST',body:JSON.stringify(body)});
+          onSaved(saved);
+        } catch(ex){ setErr(ex.message); setBusy(false); }
+      }
+
+      // The server moves the calendar's events and series to the default calendar.
+      async function del() {
+        if(!confirm(`Delete ${calendar.name}? Its events move to ${def?.name||'your default calendar'}.`)) return;
+        setBusy(true); setErr('');
+        try{ await api(`/calendars/${calendar.id}`,{method:'DELETE'}); onDeleted(calendar.id); }
+        catch(ex){ setErr(ex.message); setBusy(false); }
       }
 
       return (
         <div style={S.overlay} onClick={onClose}>
-          <div style={{...S.modal,width:340}} onClick={e=>e.stopPropagation()}>
+          <div style={{...S.modal,width:360}} onClick={e=>e.stopPropagation()}>
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
-              <h2 style={{margin:0,fontSize:18,fontWeight:700}}>New Calendar</h2>
+              <h2 style={{margin:0,fontSize:18,fontWeight:700}}>{isEdit?'Edit Calendar':'New Calendar'}</h2>
               <button onClick={onClose} style={{...S.iconBtn,fontSize:22}}>×</button>
             </div>
             <form onSubmit={save}>
               <div style={{marginBottom:16}}><label style={S.label}>Name</label><input style={S.input} value={name} onChange={e=>setName(e.target.value)} placeholder="Calendar name" autoFocus required/></div>
-              <div style={{marginBottom:20}}>
+              <div style={{marginBottom:isEdit?16:20}}>
                 <label style={S.label}>Color</label>
                 <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
                   {CALENDAR_COLORS.map(c=>(
-                    <button key={c} type="button" onClick={()=>setColor(c)} style={{width:28,height:28,borderRadius:'50%',background:c,border:color===c?'3px solid #111':'3px solid transparent',cursor:'pointer',outline:'none',transition:'0.1s'}}/>
+                    <button key={c} type="button" onClick={()=>setColor(c)} aria-label={`Color ${c}`} style={{width:28,height:28,borderRadius:'50%',background:c,border:color===c?'3px solid #111':'3px solid transparent',cursor:'pointer',outline:'none',transition:'0.1s'}}/>
                   ))}
                 </div>
+                <div style={{fontSize:12,color:'var(--text-muted)',marginTop:6}}>Events with an area show the area's color instead.</div>
               </div>
+              {isEdit&&(calendar.is_default
+                ? <div style={{fontSize:12,color:'var(--text-muted)',marginBottom:20}}>Default calendar · can't be deleted. New events go here unless you pick another.</div>
+                : <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:20,cursor:'pointer'}}>
+                    <input type="checkbox" checked={makeDefault} onChange={e=>setMakeDefault(e.target.checked)}/> Make this my default calendar
+                  </label>)}
               {err&&<div style={{color:'#dc2626',fontSize:13,marginBottom:14}}>{err}</div>}
-              <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+              <div style={{display:'flex',gap:8,justifyContent:'flex-end',flexWrap:'wrap'}}>
+                {isEdit&&!calendar.is_default&&<button type="button" onClick={del} disabled={busy} style={{...S.btnOut,color:'#dc2626',borderColor:'#fca5a5',marginRight:'auto'}}>Delete</button>}
                 <button type="button" onClick={onClose} style={S.btnOut}>Cancel</button>
-                <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Creating…':'Create'}</button>
+                <button type="submit" disabled={busy} style={S.btnPri}>{busy?'Saving…':(isEdit?'Save':'Create')}</button>
               </div>
             </form>
           </div>
@@ -1421,7 +1446,7 @@
       const [hiddenAreas,setHiddenAreas]=React.useState(()=>loadHiddenAreas(user?.id));
       const [selCals,setSel] = React.useState(new Set());
       const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
-      const [newCal,setNewCal]= React.useState(false);
+      const [calModal,setCalModal]=React.useState(null); // 'new' | calendar | null
       const [areaModal,setAreaModal]=React.useState(null); // {groupId} for new | area | null
       const [groupModal,setGroupModal]=React.useState(null); // 'new' | group | null
       const [search,setSearch]= React.useState('');
@@ -1498,7 +1523,23 @@
           alert('Could not move event: '+ex.message);
         }
       }
-      function calCreated(c){ setCals(cs=>[...cs,c]); setSel(s=>new Set([...s,c.id])); setNewCal(false); }
+      // A calendar made the default goes first, as /calendars lists it: EventModal
+      // preselects calendars[0]. A new one is shown; an edited one keeps its visibility.
+      function calSaved(c){
+        setCals(cs=>{
+          const i=cs.findIndex(x=>x.id===c.id);
+          const next=i>=0?[...cs.slice(0,i),c,...cs.slice(i+1)]:[...cs,c];
+          return c.is_default?[c,...next.filter(x=>x.id!==c.id).map(x=>x.is_default?{...x,is_default:false}:x)]:next;
+        });
+        if(calModal==='new') setSel(s=>new Set([...s,c.id]));
+        setCalModal(null);
+      }
+      // Its events now belong to the default calendar; the calendars change refetches them.
+      function calDeleted(id){
+        setCals(cs=>cs.filter(c=>c.id!==id));
+        setSel(s=>{ const n=new Set(s); n.delete(id); return n; });
+        setCalModal(null);
+      }
       function catSaved(cat){ setCats(cs=>{ const i=cs.findIndex(c=>c.id===cat.id); return i>=0?[...cs.slice(0,i),cat,...cs.slice(i+1)]:[...cs,cat]; }); }
       function catDeleted(id){ setCats(cs=>cs.filter(c=>c.id!==id)); setAreaModal(null); }
       function groupSaved(g){ setGroups(gs=>{ const i=gs.findIndex(x=>x.id===g.id); return i>=0?[...gs.slice(0,i),g,...gs.slice(i+1)]:[...gs,g]; }); setGroupModal(null); }
@@ -1543,7 +1584,8 @@
               calendars={calendars} selCals={selCals} onToggleCal={toggleCal}
               categories={cats} groups={groups} hiddenAreas={hiddenAreas} onToggleAreas={toggleAreas} eventDays={eventDays}
               onNewEvent={()=>setModal({defaultDate:date})}
-              onNewCalendar={()=>setNewCal(true)}
+              onNewCalendar={()=>setCalModal('new')}
+              onEditCalendar={c=>setCalModal(c)}
               onNewArea={groupId=>setAreaModal({groupId})}
               onEditArea={a=>setAreaModal(a)}
               onNewGroup={()=>setGroupModal('new')}
@@ -1557,7 +1599,8 @@
           </div>
 
           {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
-          {newCal&&<NewCalendarModal onSave={calCreated} onClose={()=>setNewCal(false)}/>}
+          {calModal&&<CalendarModal calendar={calModal==='new'?null:calModal} calendars={calendars} onClose={()=>setCalModal(null)}
+            onSaved={calSaved} onDeleted={calDeleted}/>}
           {areaModal&&<AreaModal area={areaModal.id?areaModal:null} defaultGroupId={areaModal.groupId} groups={groups} onClose={()=>setAreaModal(null)}
             onSaved={cat=>{ catSaved(cat); setAreaModal(null); }} onDeleted={catDeleted}/>}
           {groupModal&&<GroupModal group={groupModal==='new'?null:groupModal} groups={groups} onClose={()=>setGroupModal(null)}

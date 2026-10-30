@@ -27,7 +27,11 @@ func (h *CalendarHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	cal, err := h.repo.Create(c.Request.Context(), ownerID, req.Name, req.Description)
+	// A blank color is fine here: it means the default.
+	if !rejectBlank(c, &req.Name, nil) {
+		return
+	}
+	cal, err := h.repo.Create(c.Request.Context(), ownerID, req)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -74,6 +78,9 @@ func (h *CalendarHandler) Update(c *gin.Context) {
 	var req model.UpdateCalendarRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !rejectBlank(c, req.Name, req.Color) {
 		return
 	}
 	cal, err := h.repo.Update(c.Request.Context(), id, ownerID, req)
