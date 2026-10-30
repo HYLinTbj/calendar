@@ -161,7 +161,8 @@ func (r *CalendarRepository) Update(ctx context.Context, id, ownerID uuid.UUID, 
 
 // Delete moves the calendar's events and recurring series to the user's default
 // calendar, then deletes it.
-// Returns an error if called on the default calendar.
+// Returns ErrDeleteDefault if called on the default calendar, including one that
+// became the default after the check below (a concurrent switch).
 func (r *CalendarRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) error {
 	cal, err := r.GetByID(ctx, id, ownerID)
 	if err != nil {
@@ -196,8 +197,15 @@ func (r *CalendarRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) 
 	); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM calendars WHERE id = $1`, id); err != nil {
+	// The check above ran outside this transaction, so the DELETE checks again: a row
+	// a concurrent switch made the default is re-read here (once that switch commits)
+	// and kept, and the moves roll back. Deleting it would leave the user no default.
+	tag, err := tx.Exec(ctx, `DELETE FROM calendars WHERE id = $1 AND owner_id = $2 AND NOT is_default`, id, ownerID)
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrDeleteDefault
 	}
 	return tx.Commit(ctx)
 }

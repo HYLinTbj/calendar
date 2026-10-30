@@ -81,7 +81,7 @@ func (r *CalendarShareRepository) GetPermission(ctx context.Context, calendarID,
 
 func (r *CalendarShareRepository) ListSharedWithUser(ctx context.Context, userID uuid.UUID) ([]model.SharedCalendarEntry, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT c.id, c.owner_id, c.name, c.description, cs.permission, u.email, u.username
+		SELECT c.id, c.owner_id, c.name, c.description, c.color, cs.permission, u.email, u.username
 		FROM calendar_shares cs
 		JOIN calendars c ON c.id = cs.calendar_id
 		JOIN users u ON u.id = c.owner_id
@@ -96,7 +96,7 @@ func (r *CalendarShareRepository) ListSharedWithUser(ctx context.Context, userID
 	var results []model.SharedCalendarEntry
 	for rows.Next() {
 		var e model.SharedCalendarEntry
-		if err := rows.Scan(&e.ID, &e.OwnerID, &e.Name, &e.Description, &e.Permission, &e.OwnerEmail, &e.OwnerName); err != nil {
+		if err := rows.Scan(&e.ID, &e.OwnerID, &e.Name, &e.Description, &e.Color, &e.Permission, &e.OwnerEmail, &e.OwnerName); err != nil {
 			return nil, err
 		}
 		results = append(results, e)

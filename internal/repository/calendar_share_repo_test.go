@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/hylin/calendar/internal/model"
 	"github.com/hylin/calendar/internal/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,4 +106,22 @@ func TestCalendarShareRepository_GetPermission(t *testing.T) {
 	perm, err := r.GetPermission(ctx, cal.ID, guest.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "edit", perm)
+}
+
+func TestCalendarShareRepository_ListSharedWithUser_Color(t *testing.T) {
+	truncateAll(t, testPool)
+	owner := seedUser(t, testPool, "sh_l_owner")
+	guest := seedUser(t, testPool, "sh_l_guest")
+	ctx := context.Background()
+	cal, err := repository.NewCalendarRepository(testPool).Create(ctx, owner.ID, model.CreateCalendarRequest{Name: "Team", Color: "#0891b2"})
+	require.NoError(t, err)
+	r := repository.NewCalendarShareRepository(testPool)
+	_, err = r.Create(ctx, cal.ID, owner.ID, guest.ID, "edit")
+	require.NoError(t, err)
+
+	list, err := r.ListSharedWithUser(ctx, guest.ID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "#0891b2", list[0].Color)
+	assert.Equal(t, "edit", list[0].Permission)
 }

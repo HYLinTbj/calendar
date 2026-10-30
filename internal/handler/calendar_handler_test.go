@@ -58,6 +58,17 @@ func TestCalendarHandler_Create_Validation(t *testing.T) {
 	var resp calendarResp
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.Equal(t, model.DefaultCalendarColor, resp.Color)
+
+	// Only #rrggbb: the UI puts the colour into CSS.
+	for _, color := range []string{"banana", "url(https://tracker.example/p.png)", "#12345", "#1234567", "red"} {
+		w = Do(t, testRouter, "POST", "/calendars", token, map[string]string{"name": "Bad", "color": color})
+		assert.Equal(t, http.StatusBadRequest, w.Code, color)
+	}
+	// Trimmed and lowercased, to match the UI's swatches.
+	w = Do(t, testRouter, "POST", "/calendars", token, map[string]string{"name": "Padded", "color": " #DC2626 "})
+	require.Equal(t, http.StatusCreated, w.Code)
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "#dc2626", resp.Color)
 }
 
 type calendarResp struct {
@@ -92,10 +103,15 @@ func TestCalendarHandler_Update(t *testing.T) {
 	assert.Equal(t, "Renamed", got.Name)
 	assert.Equal(t, "#7c3aed", got.Color)
 
-	for _, body := range []map[string]string{{"name": " "}, {"color": ""}} {
+	for _, body := range []map[string]string{{"name": " "}, {"color": ""}, {"color": "url(x)"}, {"color": "#abc"}} {
 		w = Do(t, testRouter, "PUT", path, token, body)
 		assert.Equal(t, http.StatusBadRequest, w.Code, "%v", body)
 	}
+
+	w = Do(t, testRouter, "PUT", path, token, map[string]string{"color": "#ABCDEF"})
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&got))
+	assert.Equal(t, "#abcdef", got.Color)
 }
 
 func TestCalendarHandler_Update_OtherUsersCalendar(t *testing.T) {
