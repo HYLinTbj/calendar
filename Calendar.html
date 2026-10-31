@@ -1525,13 +1525,15 @@
           alert('Could not move event: '+ex.message);
         }
       }
-      // A calendar made the default goes first, as /calendars lists it: EventModal
-      // preselects calendars[0]. A new one is shown; an edited one keeps its visibility.
+      // The default goes first and the rest oldest first, as /calendars lists them:
+      // EventModal preselects calendars[0]. A new one is shown; an edited one keeps its visibility.
       function calSaved(c){
         setCals(cs=>{
           const i=cs.findIndex(x=>x.id===c.id);
           const next=i>=0?[...cs.slice(0,i),c,...cs.slice(i+1)]:[...cs,c];
-          return c.is_default?[c,...next.filter(x=>x.id!==c.id).map(x=>x.is_default?{...x,is_default:false}:x)]:next;
+          if(!c.is_default) return next;
+          return next.map(x=>x.id!==c.id&&x.is_default?{...x,is_default:false}:x)
+            .sort((a,b)=>b.is_default-a.is_default||new Date(a.created_at)-new Date(b.created_at));
         });
         if(calModal==='new') setSel(s=>new Set([...s,c.id]));
         setCalModal(null);
