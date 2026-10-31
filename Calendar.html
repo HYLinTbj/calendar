@@ -68,6 +68,7 @@
     function fmtTime(d) { return new Date(d).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}); }
     function fmtHour(h) { return h===0?'12 AM':h<12?`${h} AM`:h===12?'12 PM':`${h-12} PM`; }
     function hhmm(date) { return `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`; }
+    function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
     function fmtMins(m) { m=Math.round(m||0); const h=Math.floor(m/60), mm=m%60; if(h&&mm) return `${h}h ${mm}m`; if(h) return `${h}h`; return `${mm}m`; }
     function fmtClock(totalSec) {
       const s = Math.max(0, Math.floor(totalSec||0));
@@ -664,7 +665,8 @@
       React.useEffect(()=>{ if(ref.current) ref.current.scrollTop=7*HOUR_H-30; },[]);
       const today=new Date();
       const HOURS=Array.from({length:24},(_,i)=>i);
-      const [drag,setDrag]=React.useState(null); // { evt, dayIndex, rel, durMs, ... }, once the pointer has moved
+      const [drag,setDrag]=React.useState(null); // { evt, start, end } (evt null for a create), once the pointer has moved
+      const slotDown=React.useRef(null); // { di, y, hour } of the last press on an empty slot; null after one on an event
       const suppressClick=React.useRef(0); // timestamp of last drag end; swallows the trailing click
       const endDrag=React.useRef(null); // cancels the drag under way, if any
       // A drag is cancelled when the days on show change or the grid goes away: its
@@ -691,38 +693,56 @@
       },[days,events]);
       const hasAllDay=Object.values(allDayByDay).some(a=>a.length>0);
 
-      // Where a drag puts the event: rel minutes after midnight of the column under the
-      // pointer (negative when it starts the day before), keeping the start's seconds and
-      // the duration. One setHours call: setHours(0) then setMinutes would land an hour
-      // late on a day whose midnight DST skips (Santiago), where setHours(0) gives 01:00.
-      function dragTimes(d) {
-        let start=new Date(days[d.dayIndex]); start.setHours(0,d.rel,0,d.secMs);
+      // rel minutes after midnight of column dayIndex (negative: the day before), plus
+      // secMs. One setHours call: setHours(0) then setMinutes would land an hour late on
+      // a day whose midnight DST skips (Santiago), where setHours(0) gives 01:00.
+      function atColumn(dayIndex, rel, secMs=0, offset) {
+        let t=new Date(days[dayIndex]); t.setHours(0,rel,0,secMs);
         // In the hour that repeats when clocks go back, setHours picks the first one;
-        // keep the offset the event had, so one at the second 01:30 stays there.
-        const alt=new Date(start.getTime()+(d.offset-start.getTimezoneOffset())*60000);
-        if(alt.getHours()===start.getHours() && alt.getMinutes()===start.getMinutes()) start=alt;
-        return { start, end:new Date(start.getTime()+d.durMs) };
+        // keep the offset the time had, so one at the second 01:30 stays there.
+        if(offset!==undefined){
+          const alt=new Date(t.getTime()+(offset-t.getTimezoneOffset())*60000);
+          if(alt.getHours()===t.getHours() && alt.getMinutes()===t.getMinutes()) t=alt;
+        }
+        return t;
       }
-      // Apply the in-progress drag as a preview: pull the dragged event out of every
-      // day and put a moved clone in each day it now covers.
+      // Apply the drag under way as a preview: pull the dragged event out of every day and
+      // put a changed clone in each day it now covers. A create's is a new, untitled event
+      // in the default calendar, drawn where the editor will put it.
       const renderByDay=React.useMemo(()=>{
         if(!drag) return byDay;
-        const m={}; for(const key in byDay) m[key]=byDay[key].filter(sg=>sg.evt.id!==drag.evt.id);
-        const { start, end }=dragTimes(drag);
-        const evt={...drag.evt,start_time:start.toISOString(),end_time:end.toISOString(),_drag:true};
+        const evt={...(drag.evt||{id:'_new',title:'',calendar_id:calendars[0]?.id}),start_time:drag.start.toISOString(),end_time:drag.end.toISOString(),_drag:true};
+        const m={}; for(const key in byDay) m[key]=byDay[key].filter(sg=>sg.evt.id!==evt.id);
         timedSegments(evt).forEach(sg=>{ if(m[sg.key]) m[sg.key].push({...sg,evt}); });
         return m;
-      },[byDay,drag,days]);
+      },[byDay,drag,calendars]);
+
+      // Where a piece is drawn, in px down its column: {top, height}, plus line, the
+      // minute its bottom edge stands for (its end, or later for one drawn taller). By
+      // clock time, so it lines up with the hour labels even on a day clocks change;
+      // there a piece shows its clock times, not how long it lasts. At least 30 min
+      // tall. A piece ends by midnight, but the 30-min minimum would push a late one
+      // past the bottom of the day, so it gets only the room left (13px for one at
+      // 23:45), and at least 12px: one starting after 23:46 moves up to fit, so it can
+      // still be seen and clicked.
+      function segBox(sg) {
+        const clock=t=>t.getHours()*60+t.getMinutes();
+        const s=clock(sg.start), en=sameDay(sg.start,sg.end) ? clock(sg.end) : 24*60;
+        const at=s*(HOUR_H/60);
+        const height=clamp(Math.max(Math.max(en-s,30)*(HOUR_H/60)-2,20), 12, 24*HOUR_H-at-2);
+        const top=Math.min(at, 24*HOUR_H-2-height);
+        return { top, height, line:(top+height+2)/HOUR_H*60 };
+      }
 
       // Assign overlapping events to side-by-side columns: cluster events that
       // transitively overlap, give each the first column that's free at its start,
       // then share the cluster's width equally. Returns {id: {col, cols}}.
-      // Uses the same 30-min minimum as evStyle so visually-touching events split too.
+      // Overlap is of the boxes drawn (segBox), so events that look like they touch
+      // split too, as does a late one moved up onto the one before it.
       function layoutDay(segs) {
         const items=segs.map(sg=>{
-          const s=sg.start.getTime();
-          const en=Math.max(sg.end.getTime(),s+30*60000);
-          return {id:sg.evt.id,s,en};
+          const { top, height }=segBox(sg);
+          return {id:sg.evt.id,s:top,en:top+height+2};
         }).sort((a,b)=>a.s-b.s||b.en-a.en);
         const lay={};
         let cluster=[],colEnds=[],clusterEnd=-Infinity;
@@ -740,12 +760,7 @@
       }
 
       function evStyle(sg,col,pos,dragging) {
-        const s=sg.start, en=sg.end;
-        const dur=Math.max((en-s)/60000,30);
-        const height=Math.max(dur*(HOUR_H/60)-2,20);
-        // A segment ends by midnight, but the 30-min minimum can still push a late one
-        // past the bottom of the day; nudge it up instead so it stays readable.
-        const top=Math.min((s.getHours()*60+s.getMinutes())*(HOUR_H/60), 24*HOUR_H-height);
+        const { top, height }=segBox(sg);
         const w=100/pos.cols;
         // Square the corners where the event continues from/into the neighbouring day.
         const rTop=sg.before?0:5, rBottom=sg.after?0:5;
@@ -753,7 +768,7 @@
         // spilled past the day column's right border.
         return { position:'absolute',top,height,
                  left:`calc(${pos.col*w}% + 2px)`,width:`calc(${w}% - 6px)`,boxSizing:'border-box',
-                 background:col,borderRadius:`${rTop}px ${rTop}px ${rBottom}px ${rBottom}px`,padding:'2px 6px',overflow:'hidden',
+                 background:col,borderRadius:`${rTop}px ${rTop}px ${rBottom}px ${rBottom}px`,padding:height<24?'0 6px':'2px 6px',overflow:'hidden',
                  cursor:dragging?'grabbing':onEventDrop?'grab':'pointer',color:'#fff',fontSize:11,fontWeight:500,
                  zIndex:dragging?5:1,opacity:dragging?0.95:1,
                  boxShadow:dragging?'0 6px 16px rgba(0,0,0,0.28)':'none',
@@ -761,55 +776,156 @@
                  touchAction:'none',userSelect:'none',WebkitUserSelect:'none' };
       }
 
-      // Pointer-drag an event to reschedule it: vertical = 15-min steps, horizontal
-      // = day columns (week view). Moving past a small threshold suppresses the click
-      // so it reschedules instead of opening the editor; the drop preserves duration.
-      // Any piece of an event crossing midnight can be grabbed to move all of it.
-      function onEventDown(e, evt, di) {
+      // Pointer drags on the grid, in 15-min steps. Moving past a small threshold
+      // suppresses the click, so a drag never also opens the editor.
+      //   'move'   an event: vertical = time, horizontal = day columns (week view); the
+      //            drop keeps the duration. Any piece of an event crossing midnight can
+      //            be grabbed to move all of it.
+      //   'resize' an event's end, by the handle on its last piece, within that column;
+      //            line is where that piece's bottom is drawn (segBox).
+      //   'create' a new event, swept with a mouse from an empty slot within one column;
+      //            the editor opens with that range.
+      function startDrag(e, kind, evt, di, line) {
         // One drag at a time: a second finger neither starts another nor steers this one.
-        if(e.button!==0 || evt.all_day || !onEventDrop || endDrag.current) return;
-        const pid=e.pointerId, el=ref.current;
-        const s=new Date(evt.start_time), en=new Date(evt.end_time);
-        // The start in minutes after the grabbed column's midnight: negative when the
-        // piece grabbed continues from the day before.
-        const col=new Date(days[di]); col.setHours(0,0,0,0);
-        const startDay=new Date(s); startDay.setHours(0,0,0,0);
-        const rel0=s.getHours()*60+s.getMinutes()-Math.round((col-startDay)/864e5)*24*60;
-        const durMs=en-s, durMin=durMs/60000;
-        // Dragged either way, an event may cross midnight, but it keeps at least 15 min
-        // (all of it if shorter, or what it had) in the column under the pointer.
-        const lo=Math.min(rel0,Math.ceil(Math.min(15,durMin)-durMin)), hi=Math.max(rel0,24*60-15);
-        const base={ evt, originDayIndex:di, rel0, secMs:s.getSeconds()*1000+s.getMilliseconds(),
-                     offset:s.getTimezoneOffset(), durMs, startX:e.clientX, startY:e.clientY, scrollTop:el?el.scrollTop:0 };
-        let cur={...base,dayIndex:di,rel:rel0,moved:false};
-        let x=base.startX, y=base.startY; // where the pointer last was
+        const el=ref.current;
+        if(e.button!==0 || endDrag.current || !el) return;
+        // A finger or pen on an empty slot scrolls the grid (a tap still creates an event).
+        if(kind==='create' ? !onSlotClick || e.pointerType!=='mouse' : evt.all_day || !onEventDrop) return;
+        const pid=e.pointerId;
+        // The grid's box, measured again on each pointer move and scroll: the layout can
+        // shift under a drag (the all-day row appears once events load), and while the
+        // grid scrolls itself the pointer may not move at all.
+        let r, gTop, gBottom, colW, EDGE;
+        const measure=()=>{
+          r=el.getBoundingClientRect(); gTop=r.top; gBottom=r.top+el.clientHeight;
+          colW=(el.clientWidth-52)/days.length; // clientWidth excludes the scrollbar
+          EDGE=Math.min(40,el.clientHeight/4); // px from each edge where scrolling starts; the two never overlap
+        };
+        measure();
+        const pos0=e.clientY-gTop+el.scrollTop; // the press, in px into the day
+        // Each kind gives where the drag starts (rel0), whether the pointer has gone far
+        // enough to start it (begins), where the pointer puts it (place → {dayIndex, rel})
+        // and where that puts the event (times → {start, end}).
+        let rel0, lo, hi, begins, place, times; // place keeps rel within lo..hi
+        if(kind==='create'){
+          // From the quarter-hour pressed to the one under the pointer. It starts only once
+          // the pointer is half a step away and in another one, so a click that drifts a
+          // little still gives the hour.
+          const at0=pos0/HOUR_H*60;
+          lo=0; hi=24*60-15;
+          const quarter=m=>clamp(Math.floor(m/15)*15,lo,hi);
+          rel0=quarter(at0);
+          place=dy=>({ dayIndex:di, rel:quarter(at0+dy/HOUR_H*60) });
+          begins=(dx,dy)=>Math.abs(dy/HOUR_H*60)>=7.5 && place(dy).rel!==rel0;
+          // At least 15 min: where DST skips an hour, a start inside the gap moves past it
+          // and could land on or after the end.
+          times=({rel})=>{
+            const start=atColumn(di,Math.min(rel0,rel)), end=atColumn(di,Math.max(rel0,rel)+15);
+            return { start, end:end>start?end:new Date(start.getTime()+15*60000) };
+          };
+        } else {
+          const s=new Date(evt.start_time), en=new Date(evt.end_time), durMin=(en-s)/60000;
+          // Minutes from the grabbed column's midnight to t: negative the day before,
+          // 1440 at the next midnight.
+          const col=new Date(days[di]); col.setHours(0,0,0,0);
+          const relOf=t=>{ const d=new Date(t); d.setHours(0,0,0,0); return t.getHours()*60+t.getMinutes()+Math.round((d-col)/864e5)*24*60; };
+          if(kind==='move'){
+            // Dragged either way, an event may cross midnight, but it keeps at least 15 min
+            // (all of it if shorter, or what it had) in the column under the pointer.
+            rel0=relOf(s);
+            lo=Math.min(rel0,Math.ceil(Math.min(15,durMin)-durMin)); hi=Math.max(rel0,24*60-15);
+            const secMs=s.getSeconds()*1000+s.getMilliseconds(), offset=s.getTimezoneOffset();
+            begins=(dx,dy)=>Math.abs(dx)>=4 || Math.abs(dy)>=4;
+            place=(dy,x)=>({
+              dayIndex:days.length>1 ? clamp(Math.floor((x-r.left-52)/colW),0,days.length-1) : di,
+              rel:clamp(rel0+Math.round((dy/HOUR_H*60)/15)*15,lo,hi),
+            });
+            // Keeps the start's seconds and the duration.
+            times=({dayIndex,rel})=>{ const start=atColumn(dayIndex,rel,secMs,offset); return { start, end:new Date(start.getTime()+(en-s)) }; };
+          } else {
+            // The bottom edge drawn moves with the pointer, and the end goes to the
+            // quarter-hour nearest it: measured from the edge, not from where the handle was
+            // pressed, so a pull either way takes as far. The end stays between 00:15 and
+            // 24:00 of this column and at least min(15 min, duration) after the start, and
+            // within half a step of where it began, so a drag back changes nothing.
+            // Dragging down never shortens the event and dragging up never lengthens it (an
+            // end off the quarter-hour, say 10:07, has the nearest one on the other side).
+            // Sideways movement is ignored.
+            // The shortest end and both rules use real times, not clock minutes: where clocks
+            // skip an hour, a quarter-hour in the gap lands after it, maybe past the end.
+            rel0=relOf(en); hi=24*60;
+            lo=Math.min(rel0,Math.max(15,Math.ceil(relOf(new Date(s.getTime()+Math.min(15,durMin)*60000))/15)*15));
+            const offset=en.getTimezoneOffset();
+            const endAt=rel=>rel===rel0?new Date(en):atColumn(di,rel,0,offset);
+            begins=(dx,dy)=>Math.abs(dy)>=4;
+            place=dy=>{
+              const m=dy/HOUR_H*60, rel=clamp(Math.round((line+m)/15)*15,lo,hi), end=endAt(rel);
+              const ok=Math.abs(m)>=7.5 && (m<0 ? end<en : end>en);
+              return { dayIndex:di, rel:ok?rel:rel0 };
+            };
+            times=({rel})=>({ start:new Date(s), end:endAt(rel) });
+          }
+        }
+        let cur={ dayIndex:di, rel:rel0, moved:false }; // with the times it gives, once moved
+        const x0=e.clientX; let x=x0, y=e.clientY; // where the pointer last was
+        // Near the grid's top or bottom edge, or past it, scroll the grid, faster the
+        // closer the pointer is; the scroll listener then moves the drag along. A finger
+        // dragging an event can't scroll the grid itself (touchAction:none). A press
+        // already near an edge scrolls only once the pointer goes on toward it, or after
+        // it has left that band, so grabbing a handle there doesn't set the grid running.
+        const MAX_STEP=14; // px per 1/60 s
+        let holdUp=y<gTop+EDGE?y:null, holdDown=y>gBottom-EDGE?y:null;
+        // Signed px per 1/60 s; 0 outside the bands.
+        const edgeSpeed=()=>{
+          if(y>=gTop+EDGE) holdUp=null;
+          if(y<=gBottom-EDGE) holdDown=null;
+          const upAt=Math.min(gTop+EDGE,holdUp??Infinity), downAt=Math.max(gBottom-EDGE,holdDown??-Infinity);
+          const over=y<upAt ? y-upAt : y>downAt ? y-downAt : 0;
+          // A resize at its shortest has nothing to gain from scrolling up, which would only
+          // carry the event off. The other limits are at or past the grid's own ends.
+          if(!over || kind==='resize' && over<0 && cur.rel<=lo) return 0;
+          return Math.sign(over)*clamp(Math.abs(over)/EDGE*MAX_STEP,1,MAX_STEP);
+        };
+        // Runs only while the pointer is in a band and the grid still scrolls that way.
+        // A step covers the time since the last frame (0.06 frames of 1/60 s per ms), so
+        // the speed is the same at any refresh rate. Steps are whole px and what one didn't
+        // move carries over: the browser may round a scroll to a whole px (a half-px step
+        // up is lost) or, at 50% zoom, to two. A step of a screen pixel or more that moves
+        // nothing means the grid's end.
+        let raf=0, last=0, carry=0;
+        const tick=ts=>{
+          const v=edgeSpeed();
+          if(v){
+            carry+=v*(last?Math.min(4,(ts-last)*0.06):1); last=ts;
+            const step=Math.trunc(carry), was=el.scrollTop;
+            if(step) el.scrollTop+=step;
+            carry-=el.scrollTop-was;
+            if(el.scrollTop!==was || Math.abs(step)<1/(window.devicePixelRatio||1)){ raf=requestAnimationFrame(tick); return; }
+          }
+          raf=0; last=0; carry=0;
+        };
         // Follow the pointer, counting any scrolling of the grid since the drag began.
         const update=()=>{
-          const dy=y-base.startY+(el?el.scrollTop-base.scrollTop:0);
-          if(!cur.moved && Math.abs(x-base.startX)<4 && Math.abs(dy)<4) return;
+          const dy=y-gTop+el.scrollTop-pos0;
+          if(!cur.moved && !begins(x-x0,dy)) return;
           if(!cur.moved){
-            document.body.style.cursor='grabbing'; document.body.style.userSelect='none';
+            document.body.style.cursor=kind==='move'?'grabbing':'ns-resize';
+            document.body.style.userSelect=document.body.style.webkitUserSelect='none';
             // The grid takes the pointer's events from here on: the piece grabbed may be
             // redrawn in another column, and the release must still reach us.
-            try { if(el) el.setPointerCapture(pid); } catch {}
+            try { el.setPointerCapture(pid); } catch {}
           }
-          const deltaMin=Math.round((dy/HOUR_H*60)/15)*15;
-          const rel=Math.max(lo,Math.min(hi,base.rel0+deltaMin));
-          let dayIndex=base.originDayIndex;
-          if(el && days.length>1){
-            const r=el.getBoundingClientRect();
-            const colW=(el.clientWidth-52)/days.length; // clientWidth excludes the scrollbar
-            dayIndex=Math.max(0,Math.min(days.length-1,Math.floor((x-r.left-52)/colW)));
-          }
+          const { dayIndex, rel }=place(dy,x);
           if(cur.moved && dayIndex===cur.dayIndex && rel===cur.rel) return; // same slot: nothing to re-render
-          cur={...base,dayIndex,rel,moved:true};
-          setDrag(cur);
+          cur={ dayIndex, rel, moved:true, ...times({ dayIndex, rel }) };
+          setDrag({ evt, start:cur.start, end:cur.end });
         };
+        const onScroll=()=>{ measure(); update(); };
         const move=ev=>{
           if(ev.pointerId!==pid) return;
           if(!ev.buttons){ finish(true); return; } // released where we couldn't see it
-          x=ev.clientX; y=ev.clientY; update();
-          if(cur.moved) ev.preventDefault();
+          x=ev.clientX; y=ev.clientY; measure(); update();
+          if(cur.moved){ ev.preventDefault(); if(!raf && edgeSpeed()) raf=requestAnimationFrame(tick); }
         };
         // finish tears down listeners and restores body styles. The browser can end
         // a drag with pointercancel (touch gesture takeover, focus loss, pen leaving
@@ -819,14 +935,14 @@
           window.removeEventListener('pointermove',move);
           window.removeEventListener('pointerup',up);
           window.removeEventListener('pointercancel',cancel);
-          if(el) el.removeEventListener('scroll',update);
-          document.body.style.cursor=''; document.body.style.userSelect='';
+          el.removeEventListener('scroll',onScroll);
+          cancelAnimationFrame(raf);
+          document.body.style.cursor=''; document.body.style.userSelect=document.body.style.webkitUserSelect='';
           endDrag.current=null;
           if(!cur.moved) return;
           if(!cancelled){
             suppressClick.current=Date.now();
-            const { start, end }=dragTimes(cur);
-            onEventDrop(base.evt, start, end);
+            if(kind==='create') onSlotClick(cur.start, cur.end); else onEventDrop(evt, cur.start, cur.end);
           }
           setDrag(null);
         };
@@ -836,8 +952,10 @@
         window.addEventListener('pointermove',move);
         window.addEventListener('pointerup',up);
         window.addEventListener('pointercancel',cancel);
-        if(el) el.addEventListener('scroll',update);
+        el.addEventListener('scroll',onScroll);
       }
+      // A press on an event, or on its resize handle, isn't a press on the slot below.
+      const grab=(e,kind,evt,di,line)=>{ e.stopPropagation(); slotDown.current=null; startDrag(e,kind,evt,di,line); };
 
       return (
         <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
@@ -897,10 +1015,24 @@
                 const k=ymd(day);
                 const dayEvts=renderByDay[k]||[];
                 return (
-                  <div key={di} style={{flex:1,position:'relative',borderLeft:'1px solid var(--border)'}}>
+                  <div key={di} style={{flex:1,position:'relative',borderLeft:'1px solid var(--border)',userSelect:'none',WebkitUserSelect:'none'}}
+                       onPointerDown={e=>{
+                         const hour=clamp(Math.floor((e.clientY-e.currentTarget.getBoundingClientRect().top)/HOUR_H),0,23);
+                         slotDown.current={ di, y:e.clientY, hour };
+                         startDrag(e,'create',null,di);
+                       }}
+                       onClick={e=>{
+                         // A click opens the hour pressed, as a sweep starts where it's pressed. It's
+                         // caught here, not on each hour, as one released across an hour line or on
+                         // an event goes to the column. A release a quarter-hour or more from the
+                         // press (say, a pen dragged where it doesn't pan) is no click; nearer, a
+                         // mouse would have swept one out.
+                         const down=slotDown.current;
+                         if(down?.di!==di || Math.abs(e.clientY-down.y)>=HOUR_H/4 || Date.now()-suppressClick.current<300) return;
+                         onSlotClick(atColumn(di,down.hour*60));
+                       }}>
                     {HOURS.map(h=>(
-                      <div key={h} style={{position:'absolute',top:h*HOUR_H,left:0,right:0,height:HOUR_H,borderTop:'1px solid var(--border)',cursor:'pointer'}}
-                           onClick={()=>{ if(Date.now()-suppressClick.current<300) return; const d=new Date(day); d.setHours(h,0,0,0); onSlotClick(d); }}/>
+                      <div key={h} style={{position:'absolute',top:h*HOUR_H,left:0,right:0,height:HOUR_H,borderTop:'1px solid var(--border)',cursor:'pointer'}}/>
                     ))}
                     {(()=>{
                       const lay=layoutDay(dayEvts);
@@ -909,16 +1041,26 @@
                         const col=getEventColor(evt,calendars,categories);
                         const area=getEventArea(evt,categories);
                         const dragging=!!evt._drag;
+                        const st=evStyle(sg,col,lay[evt.id],dragging);
+                        // A piece being dragged shows its new times first, so a short chip still
+                        // has room for them; in a narrow one they break only between start and end.
+                        const range=dragging&&!sg.before&&<div style={{opacity:0.85,fontSize:10}}>
+                          <span style={{whiteSpace:'nowrap'}}>{fmtTime(evt.start_time)} –</span>{' '}<span style={{whiteSpace:'nowrap'}}>{fmtTime(evt.end_time)}</span>
+                        </div>;
                         return (
-                          <div key={evt.id} style={evStyle(sg,col,lay[evt.id],dragging)}
-                               onPointerDown={e=>onEventDown(e,evt,di)}
+                          <div key={evt.id} style={st}
+                               onPointerDown={e=>grab(e,'move',evt,di)}
                                onClick={e=>{ e.stopPropagation(); if(Date.now()-suppressClick.current<300) return; onEventClick(evt); }}>
+                            {range}
                             <div style={{fontWeight:600,fontSize:11,lineHeight:1.3,overflow:'hidden',whiteSpace:'nowrap',textOverflow:'ellipsis'}}>
                               {area?.code&&<span style={{marginRight:4}}><AreaBadge area={area} onColor size={9}/></span>}<SeriesMark evt={evt}/>{evt.title}
                             </div>
-                            <div style={{opacity:0.85,fontSize:10}}>{sg.before
+                            {!range&&<div style={{opacity:0.85,fontSize:10}}>{sg.before
                               ? (sg.after ? `from ${fmtTime(evt.start_time)}` : `until ${fmtTime(evt.end_time)}`)
-                              : fmtTime(evt.start_time)}</div>
+                              : fmtTime(evt.start_time)}</div>}
+                            {/* Resize handle: the bottom edge of the piece where the event ends. */}
+                            {!sg.after&&onEventDrop&&<div onPointerDown={e=>grab(e,'resize',evt,di,segBox(sg).line)}
+                              style={{position:'absolute',left:0,right:0,bottom:0,height:Math.min(8,Math.round(st.height/3)),cursor:'ns-resize'}}/>}
                           </div>
                         );
                       });
@@ -977,7 +1119,7 @@
     // ─────────────────────────────────────────────
     // EVENT MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function EventModal({ event, defaultDate, calendars, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
+    function EventModal({ event, defaultDate, defaultEnd, calendars, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
       const isEdit = !!event?.id;
       const isRecurring = isEdit && !!event.recurring_event_id;
       // Edited on its own: no longer linked, but still part of its series, so it can delete
@@ -989,7 +1131,8 @@
         if(defaultDate){ const d=new Date(defaultDate); d.setSeconds(0,0); return d; }
         const d=new Date(); d.setMinutes(0,0,0); return d;
       },[]);
-      const defEnd = React.useMemo(()=>{ const d=new Date(defStart); d.setHours(d.getHours()+1); return d; },[defStart]);
+      // A range swept on the grid gives its own end; otherwise an hour.
+      const defEnd = React.useMemo(()=>{ if(defaultEnd) return new Date(defaultEnd); const d=new Date(defStart); d.setHours(d.getHours()+1); return d; },[defStart,defaultEnd]);
 
       // All-day events are stored as UTC midnight..23:59:59Z, so read their dates in UTC
       // (as evtKey does) — the local date is a day off in any non-UTC timezone, and
@@ -1420,7 +1563,7 @@
       const tracesReq = React.useRef(0); // number of the latest traces request
       const [hiddenAreas,setHiddenAreas]=React.useState(()=>loadHiddenAreas(user?.id));
       const [selCals,setSel] = React.useState(new Set());
-      const [modal,setModal] = React.useState(null);   // { event?, defaultDate? }
+      const [modal,setModal] = React.useState(null);   // { event?, defaultDate?, defaultEnd? }
       const [newCal,setNewCal]= React.useState(false);
       const [areaModal,setAreaModal]=React.useState(null); // {groupId} for new | area | null
       const [groupModal,setGroupModal]=React.useState(null); // 'new' | group | null
@@ -1482,7 +1625,7 @@
       function toggleCal(id){ setSel(s=>{ const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; }); }
       function eventSaved(saved){ setEvts(es=>{ const i=es.findIndex(e=>e.id===saved.id); return i>=0?[...es.slice(0,i),saved,...es.slice(i+1)]:[...es,saved]; }); setModal(null); }
       function eventDeleted(id){ setEvts(es=>es.filter(e=>e.id!==id)); setModal(null); }
-      // Drag-to-reschedule: optimistically move the event, PUT the new times, roll back on failure.
+      // Drag to move or resize: optimistically change the event, PUT the new times, roll back on failure.
       async function eventMoved(evt, start, end){
         // Compare instants: the server writes "…:00Z", toISOString "…:00.000Z".
         if(new Date(evt.start_time).getTime()===start.getTime() && new Date(evt.end_time).getTime()===end.getTime()) return;
@@ -1495,7 +1638,7 @@
           // Roll back just this event's times so a concurrent change elsewhere
           // (another drag, a modal save) isn't reverted along with it.
           setEvts(es=>es.map(e=>e.id===evt.id?{...e,start_time:evt.start_time,end_time:evt.end_time}:e));
-          alert('Could not move event: '+ex.message);
+          alert('Could not reschedule event: '+ex.message);
         }
       }
       function calCreated(c){ setCals(cs=>[...cs,c]); setSel(s=>new Set([...s,c.id])); setNewCal(false); }
@@ -1551,12 +1694,12 @@
 
             <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               {view==='month'&&<MonthView currentDate={date} events={visible} calendars={calendars} categories={cats} onDayClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
-              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
-              {view==='day'&&<TimeGrid days={[date]} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='day'&&<TimeGrid days={[date]} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
             </div>
           </div>
 
-          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} calendars={calendars} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} defaultEnd={modal.defaultEnd} calendars={calendars} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
           {newCal&&<NewCalendarModal onSave={calCreated} onClose={()=>setNewCal(false)}/>}
           {areaModal&&<AreaModal area={areaModal.id?areaModal:null} defaultGroupId={areaModal.groupId} groups={groups} onClose={()=>setAreaModal(null)}
             onSaved={cat=>{ catSaved(cat); setAreaModal(null); }} onDeleted={catDeleted}/>}
