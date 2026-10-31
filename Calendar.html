@@ -69,6 +69,8 @@
     function fmtHour(h) { return h===0?'12 AM':h<12?`${h} AM`:h===12?'12 PM':`${h-12} PM`; }
     function hhmm(date) { return `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`; }
     function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+    // Minutes past midnight by the clock: on a day clocks change, not the time elapsed.
+    function clockMin(t) { return t.getHours()*60+t.getMinutes(); }
     function fmtMins(m) { m=Math.round(m||0); const h=Math.floor(m/60), mm=m%60; if(h&&mm) return `${h}h ${mm}m`; if(h) return `${h}h`; return `${mm}m`; }
     function fmtClock(totalSec) {
       const s = Math.max(0, Math.floor(totalSec||0));
@@ -583,7 +585,7 @@
     function NowLine() {
       const [now,setNow]=React.useState(new Date());
       React.useEffect(()=>{ const id=setInterval(()=>setNow(new Date()),30000); return ()=>clearInterval(id); },[]);
-      const top=(now.getHours()*60+now.getMinutes())*(HOUR_H/60);
+      const top=clockMin(now)*(HOUR_H/60);
       return (
         <div style={{position:'absolute',top,left:0,right:0,height:2,background:'#ef4444',zIndex:2,pointerEvents:'none'}}>
           <div style={{width:8,height:8,borderRadius:'50%',background:'#ef4444',position:'absolute',left:-3,top:-3}}/>
@@ -717,21 +719,18 @@
         return m;
       },[byDay,drag,calendars]);
 
-      // Where a piece is drawn, in px down its column: {top, height}, plus line, the
-      // minute its bottom edge stands for (its end, or later for one drawn taller). By
-      // clock time, so it lines up with the hour labels even on a day clocks change;
-      // there a piece shows its clock times, not how long it lasts. At least 30 min
-      // tall. A piece ends by midnight, but the 30-min minimum would push a late one
-      // past the bottom of the day, so it gets only the room left (13px for one at
-      // 23:45), and at least 12px: one starting after 23:46 moves up to fit, so it can
-      // still be seen and clicked.
+      // Where a piece is drawn, in px down its column: {top, height}. By clock time, so it
+      // lines up with the hour labels even on a day clocks change; there a piece shows
+      // its clock times, not how long it lasts. At least 30 min tall. A piece ends by
+      // midnight, but the 30-min minimum would push a late one past the bottom of the
+      // day, so it gets only the room left (13px for one at 23:45), and at least 12px:
+      // one starting after 23:46 moves up to fit, so it can still be seen and clicked.
       function segBox(sg) {
-        const clock=t=>t.getHours()*60+t.getMinutes();
-        const s=clock(sg.start), en=sameDay(sg.start,sg.end) ? clock(sg.end) : 24*60;
+        const s=clockMin(sg.start), en=sameDay(sg.start,sg.end) ? clockMin(sg.end) : 24*60;
         const at=s*(HOUR_H/60);
-        const height=clamp(Math.max(Math.max(en-s,30)*(HOUR_H/60)-2,20), 12, 24*HOUR_H-at-2);
+        const height=clamp(Math.max(en-s,30)*(HOUR_H/60)-2, 12, 24*HOUR_H-at-2);
         const top=Math.min(at, 24*HOUR_H-2-height);
-        return { top, height, line:(top+height+2)/HOUR_H*60 };
+        return { top, height };
       }
 
       // Assign overlapping events to side-by-side columns: cluster events that
@@ -781,11 +780,10 @@
       //   'move'   an event: vertical = time, horizontal = day columns (week view); the
       //            drop keeps the duration. Any piece of an event crossing midnight can
       //            be grabbed to move all of it.
-      //   'resize' an event's end, by the handle on its last piece, within that column;
-      //            line is where that piece's bottom is drawn (segBox).
+      //   'resize' an event's end, by the handle on its last piece, within that column.
       //   'create' a new event, swept with a mouse from an empty slot within one column;
       //            the editor opens with that range.
-      function startDrag(e, kind, evt, di, line) {
+      function startDrag(e, kind, evt, di) {
         // One drag at a time: a second finger neither starts another nor steers this one.
         const el=ref.current;
         if(e.button!==0 || endDrag.current || !el) return;
@@ -828,7 +826,7 @@
           // Minutes from the grabbed column's midnight to t: negative the day before,
           // 1440 at the next midnight.
           const col=new Date(days[di]); col.setHours(0,0,0,0);
-          const relOf=t=>{ const d=new Date(t); d.setHours(0,0,0,0); return t.getHours()*60+t.getMinutes()+Math.round((d-col)/864e5)*24*60; };
+          const relOf=t=>{ const d=new Date(t); d.setHours(0,0,0,0); return clockMin(t)+Math.round((d-col)/864e5)*24*60; };
           if(kind==='move'){
             // Dragged either way, an event may cross midnight, but it keeps at least 15 min
             // (all of it if shorter, or what it had) in the column under the pointer.
@@ -843,14 +841,15 @@
             // Keeps the start's seconds and the duration.
             times=({dayIndex,rel})=>{ const start=atColumn(dayIndex,rel,secMs,offset); return { start, end:new Date(start.getTime()+(en-s)) }; };
           } else {
-            // The bottom edge drawn moves with the pointer, and the end goes to the
-            // quarter-hour nearest it: measured from the edge, not from where the handle was
-            // pressed, so a pull either way takes as far. The end stays between 00:15 and
-            // 24:00 of this column and at least min(15 min, duration) after the start, and
-            // within half a step of where it began, so a drag back changes nothing.
-            // Dragging down never shortens the event and dragging up never lengthens it (an
-            // end off the quarter-hour, say 10:07, has the nearest one on the other side).
-            // Sideways movement is ignored.
+            // The end moves as far as the pointer has, to the nearest quarter-hour: counted
+            // from the end, not from where the handle was pressed, so a pull either way
+            // takes as far. A piece under 30 min is drawn taller than it lasts, so there the
+            // bottom edge trails the pointer, but every quarter-hour can be reached. The end
+            // stays between 00:15 and 24:00 of this column and at least min(15 min,
+            // duration) after the start, and within half a step of where it began, so a
+            // drag back changes nothing. Dragging down never shortens the event and
+            // dragging up never lengthens it (an end off the quarter-hour, say 10:07, has
+            // the nearest one on the other side). Sideways movement is ignored.
             // The shortest end and both rules use real times, not clock minutes: where clocks
             // skip an hour, a quarter-hour in the gap lands after it, maybe past the end.
             rel0=relOf(en); hi=24*60;
@@ -859,7 +858,7 @@
             const endAt=rel=>rel===rel0?new Date(en):atColumn(di,rel,0,offset);
             begins=(dx,dy)=>Math.abs(dy)>=4;
             place=dy=>{
-              const m=dy/HOUR_H*60, rel=clamp(Math.round((line+m)/15)*15,lo,hi), end=endAt(rel);
+              const m=dy/HOUR_H*60, rel=clamp(Math.round((rel0+m)/15)*15,lo,hi), end=endAt(rel);
               const ok=Math.abs(m)>=7.5 && (m<0 ? end<en : end>en);
               return { dayIndex:di, rel:ok?rel:rel0 };
             };
@@ -955,7 +954,7 @@
         el.addEventListener('scroll',onScroll);
       }
       // A press on an event, or on its resize handle, isn't a press on the slot below.
-      const grab=(e,kind,evt,di,line)=>{ e.stopPropagation(); slotDown.current=null; startDrag(e,kind,evt,di,line); };
+      const grab=(e,kind,evt,di)=>{ e.stopPropagation(); slotDown.current=null; startDrag(e,kind,evt,di); };
 
       return (
         <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
@@ -1059,7 +1058,7 @@
                               ? (sg.after ? `from ${fmtTime(evt.start_time)}` : `until ${fmtTime(evt.end_time)}`)
                               : fmtTime(evt.start_time)}</div>}
                             {/* Resize handle: the bottom edge of the piece where the event ends. */}
-                            {!sg.after&&onEventDrop&&<div onPointerDown={e=>grab(e,'resize',evt,di,segBox(sg).line)}
+                            {!sg.after&&onEventDrop&&<div onPointerDown={e=>grab(e,'resize',evt,di)}
                               style={{position:'absolute',left:0,right:0,bottom:0,height:Math.min(8,Math.round(st.height/3)),cursor:'ns-resize'}}/>}
                           </div>
                         );
@@ -2381,7 +2380,7 @@
                           <button type="button" disabled={future} onClick={e=>{
                               // Fixed to the viewport: the table's sideways scroll would clip it.
                               const b=e.currentTarget.getBoundingClientRect(), w=270;
-                              setOpen(o=>o?.id===id?null:{ id, top:b.bottom+4, left:Math.max(8,Math.min(b.left,window.innerWidth-w-8)) });
+                              setOpen(o=>o?.id===id?null:{ id, top:b.bottom+4, left:clamp(b.left,8,window.innerWidth-w-8) });
                             }} aria-label={`${r.area?r.area.name:'No area'}, ${d}`}
                             style={{width:'100%',height:'100%',minHeight:56,padding:'8px 6px',border:'none',background:'transparent',cursor:future?'default':'pointer',display:'flex',flexDirection:'column',justifyContent:'center',gap:5}}>
                             <span style={{fontFamily:'var(--font-mono)',fontSize:13,textAlign:'center',color:sum?'var(--text)':'#d1d5db'}}>{future?'':sum?fmtMins(sum):'·'}</span>
