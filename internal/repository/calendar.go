@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hylin/calendar/internal/model"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -110,82 +111,82 @@ func (r *CalendarRepository) List(ctx context.Context, ownerID uuid.UUID) ([]mod
 	return calendars, rows.Err()
 }
 
+// lockOwnerCalendars holds the user's row until tx ends, so default switches and
+// deletes run one at a time per user and each reads the default after the last one
+// committed. NO KEY UPDATE leaves alone the key-share locks that inserts referencing
+// the user take, so creating events meanwhile doesn't wait.
+func lockOwnerCalendars(ctx context.Context, tx pgx.Tx, ownerID uuid.UUID) error {
+	_, err := tx.Exec(ctx, `SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE`, ownerID)
+	return err
+}
+
+// Update applies the fields req sets, each in the UPDATE itself, so concurrent edits
+// of different fields both stick. Making a calendar the default unsets the old one
+// first (the unique index allows one), under lockOwnerCalendars.
 func (r *CalendarRepository) Update(ctx context.Context, id, ownerID uuid.UUID, req model.UpdateCalendarRequest) (*model.Calendar, error) {
-	current, err := r.GetByID(ctx, id, ownerID)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if req.Name != nil {
-		current.Name = *req.Name
-	}
-	if req.Description != nil {
-		current.Description = *req.Description
-	}
-	if req.Color != nil {
-		current.Color = *req.Color
-	}
+	defer tx.Rollback(ctx)
 
-	// Switching the default requires unsetting the old one first (within a transaction).
-	if req.IsDefault != nil && *req.IsDefault && !current.IsDefault {
-		tx, err := r.pool.Begin(ctx)
-		if err != nil {
+	makeDefault := req.IsDefault != nil && *req.IsDefault
+	if makeDefault {
+		if err := lockOwnerCalendars(ctx, tx, ownerID); err != nil {
 			return nil, err
 		}
-		defer tx.Rollback(ctx)
-
 		if _, err := tx.Exec(ctx,
-			`UPDATE calendars SET is_default = false, updated_at = NOW() WHERE owner_id = $1 AND is_default = true`,
-			ownerID,
+			`UPDATE calendars SET is_default = false, updated_at = NOW() WHERE owner_id = $1 AND is_default AND id <> $2`,
+			ownerID, id,
 		); err != nil {
 			return nil, err
 		}
-		var c model.Calendar
-		if err := scanCalendar(tx.QueryRow(ctx, `
-			UPDATE calendars SET name=$1, description=$2, color=$3, is_default=true, updated_at=NOW()
-			WHERE id=$4 AND owner_id=$5
-			RETURNING `+calendarCols,
-			current.Name, current.Description, current.Color, id, ownerID), &c); err != nil {
-			return nil, err
-		}
-		return &c, tx.Commit(ctx)
 	}
-
 	var c model.Calendar
-	err = scanCalendar(r.pool.QueryRow(ctx, `
-		UPDATE calendars SET name=$1, description=$2, color=$3, updated_at=NOW()
-		WHERE id=$4 AND owner_id=$5
+	if err := scanCalendar(tx.QueryRow(ctx, `
+		UPDATE calendars SET name = COALESCE($1, name), description = COALESCE($2, description),
+			color = COALESCE($3, color), is_default = is_default OR $4, updated_at = NOW()
+		WHERE id = $5 AND owner_id = $6
 		RETURNING `+calendarCols,
-		current.Name, current.Description, current.Color, id, ownerID), &c)
-	return &c, err
+		req.Name, req.Description, req.Color, makeDefault, id, ownerID), &c); err != nil {
+		return nil, err
+	}
+	return &c, tx.Commit(ctx)
 }
 
 // Delete moves the calendar's events and recurring series to the user's default
-// calendar, then deletes it.
-// Returns ErrDeleteDefault if called on the default calendar, including one that
-// became the default after the check below (a concurrent switch).
+// calendar, then deletes it. Returns ErrDeleteDefault if called on the default
+// calendar. It runs under lockOwnerCalendars, so a concurrent switch or delete
+// finishes before it reads the calendar and the default.
 func (r *CalendarRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) error {
-	cal, err := r.GetByID(ctx, id, ownerID)
-	if err != nil {
-		return err
-	}
-	if cal.IsDefault {
-		return ErrDeleteDefault
-	}
-
-	def, err := r.GetDefault(ctx, ownerID)
-	if err != nil {
-		return err
-	}
-
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 
+	if err := lockOwnerCalendars(ctx, tx, ownerID); err != nil {
+		return err
+	}
+	var isDefault bool
+	if err := tx.QueryRow(ctx,
+		`SELECT is_default FROM calendars WHERE id = $1 AND owner_id = $2`, id, ownerID,
+	).Scan(&isDefault); err != nil {
+		return err
+	}
+	if isDefault {
+		return ErrDeleteDefault
+	}
+	var defID uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM calendars WHERE owner_id = $1 AND is_default`, ownerID,
+	).Scan(&defID); err != nil {
+		return err
+	}
+
 	if _, err := tx.Exec(ctx,
 		`UPDATE events SET calendar_id = $1 WHERE calendar_id = $2`,
-		def.ID, id,
+		defID, id,
 	); err != nil {
 		return err
 	}
@@ -193,19 +194,12 @@ func (r *CalendarRepository) Delete(ctx context.Context, id, ownerID uuid.UUID) 
 	// would make the delete fail.
 	if _, err := tx.Exec(ctx,
 		`UPDATE recurring_events SET calendar_id = $1 WHERE calendar_id = $2`,
-		def.ID, id,
+		defID, id,
 	); err != nil {
 		return err
 	}
-	// The check above ran outside this transaction, so the DELETE checks again: a row
-	// a concurrent switch made the default is re-read here (once that switch commits)
-	// and kept, and the moves roll back. Deleting it would leave the user no default.
-	tag, err := tx.Exec(ctx, `DELETE FROM calendars WHERE id = $1 AND owner_id = $2 AND NOT is_default`, id, ownerID)
-	if err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM calendars WHERE id = $1 AND owner_id = $2`, id, ownerID); err != nil {
 		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrDeleteDefault
 	}
 	return tx.Commit(ctx)
 }
