@@ -72,8 +72,8 @@ func normalizeCodeField(c *gin.Context, code *string) bool {
 	return true
 }
 
-// rejectBlank writes a 400 and returns false if name or color (both required on
-// create) is empty or whitespace. A nil one, absent from an update, passes.
+// rejectBlank writes a 400 and returns false if name or color is empty or
+// whitespace. A nil one (absent from an update, or optional) passes.
 func rejectBlank(c *gin.Context, name, color *string) bool {
 	for field, v := range map[string]*string{"name": name, "color": color} {
 		if v != nil && strings.TrimSpace(*v) == "" {

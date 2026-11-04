@@ -39,7 +39,7 @@ func seedUser(t *testing.T, pool *pgxpool.Pool, suffix string) *model.User {
 func seedCalendar(t *testing.T, pool *pgxpool.Pool, ownerID uuid.UUID, name string) *model.Calendar {
 	t.Helper()
 	r := repository.NewCalendarRepository(pool)
-	c, err := r.Create(context.Background(), ownerID, name, "")
+	c, err := r.Create(context.Background(), ownerID, model.CreateCalendarRequest{Name: name})
 	require.NoError(t, err)
 	return c
 }

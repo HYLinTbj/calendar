@@ -21,6 +21,7 @@ type SharedCalendarEntry struct {
 	OwnerID     uuid.UUID `json:"owner_id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
+	Color       string    `json:"color"`
 	Permission  string    `json:"permission"`
 	OwnerEmail  string    `json:"owner_email"`
 	OwnerName   string    `json:"owner_name"`
