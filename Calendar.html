@@ -663,7 +663,7 @@
       );
     }
 
-    function TimeGrid({ days, events, traces=[], onOpenLog, calendars, categories, onSlotClick, onEventClick, onEventDrop }) {
+    function TimeGrid({ days, events, traces=[], onOpenLog, calendars, newCalendarId, categories, onSlotClick, onEventClick, onEventDrop }) {
       const ref=React.useRef(null);
       React.useEffect(()=>{ if(ref.current) ref.current.scrollTop=7*HOUR_H-30; },[]);
       const today=new Date();
@@ -718,14 +718,14 @@
       }
       // Apply the drag under way as a preview: pull the dragged event out of every day and
       // put a changed clone in each day it now covers. A create's is a new, untitled event
-      // in the default calendar, drawn where the editor will put it.
+      // in the calendar the editor will pick, drawn where the editor will put it.
       const renderByDay=React.useMemo(()=>{
         if(!drag) return byDay;
-        const evt={...(drag.evt||{id:'_new',title:'',calendar_id:calendars[0]?.id}),start_time:drag.start.toISOString(),end_time:drag.end.toISOString(),_drag:true};
+        const evt={...(drag.evt||{id:'_new',title:'',calendar_id:newCalendarId}),start_time:drag.start.toISOString(),end_time:drag.end.toISOString(),_drag:true};
         const m={}; for(const key in byDay) m[key]=byDay[key].filter(sg=>sg.evt.id!==evt.id);
         timedSegments(evt).forEach(sg=>{ if(m[sg.key]) m[sg.key].push({...sg,evt}); });
         return m;
-      },[byDay,drag,calendars]);
+      },[byDay,drag,newCalendarId]);
 
       // Where a piece is drawn, in px down its column: {top, height}. By clock time, so it
       // lines up with the hour labels even on a day clocks change; there a piece shows
@@ -1132,7 +1132,7 @@
     // ─────────────────────────────────────────────
     // EVENT MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function EventModal({ event, defaultDate, defaultEnd, calendars, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
+    function EventModal({ event, defaultDate, defaultEnd, calendars, newCalendarId, shownCals, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated }) {
       const isEdit = !!event?.id;
       const isRecurring = isEdit && !!event.recurring_event_id;
       // Edited on its own: no longer linked, but still part of its series, so it can delete
@@ -1155,7 +1155,7 @@
         title:       event?.title||'',
         description: event?.description||'',
         location:    event?.location||'',
-        calendar_id: event?.calendar_id||calendars[0]?.id||'',
+        calendar_id: event?.calendar_id||newCalendarId||calendars[0]?.id||'',
         category_id: event?.category_id||'',
         all_day:     event?.all_day||false,
         private:     event?.visibility==='private',
@@ -1458,6 +1458,7 @@
                     {calendars.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                   {isRecurring&&<div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>Can't be changed on a recurring series.</div>}
+                  {shownCals&&form.calendar_id&&!shownCals.has(form.calendar_id)&&<div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>Hidden in the sidebar, so this event won't show until you tick it.</div>}
                 </div>
                 <div>
                   <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between'}}>
@@ -1570,7 +1571,7 @@
                 <div style={{fontSize:12,color:'var(--text-muted)',marginTop:6}}>Events with an area show the area's color instead.</div>
               </div>
               {isEdit&&(calendar.is_default
-                ? <div style={{fontSize:12,color:'var(--text-muted)',marginBottom:20}}>Default calendar · can't be deleted. New events go here unless you pick another.</div>
+                ? <div style={{fontSize:12,color:'var(--text-muted)',marginBottom:20}}>Default calendar · can't be deleted. New events go here unless you pick another or hide it.</div>
                 : <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,marginBottom:20,cursor:'pointer'}}>
                     <input type="checkbox" checked={makeDefault} onChange={e=>setMakeDefault(e.target.checked)}/> Make this my default calendar
                   </label>)}
@@ -1681,7 +1682,7 @@
         }
       }
       // The default goes first and the rest oldest first, as /calendars lists them:
-      // EventModal preselects calendars[0]. A new one is shown; an edited one keeps its visibility.
+      // newCalId picks the first one shown. A new one is shown; an edited one keeps its visibility.
       function calSaved(c){
         setCals(cs=>{
           const i=cs.findIndex(x=>x.id===c.id);
@@ -1717,6 +1718,9 @@
         return events.filter(e=>selCals.has(e.calendar_id) && !hiddenAreas.has(mine.has(e.category_id)?e.category_id:'none'));
       },[events,selCals,hiddenAreas,cats]);
       const eventDays = React.useMemo(()=>new Set(visible.flatMap(dayKeys)),[visible]);
+      // A new event goes to the default calendar, or the first other one ticked if the
+      // default is hidden, so that it shows once saved. With none ticked it's the default.
+      const newCalId=(calendars.find(c=>selCals.has(c.id))||calendars[0])?.id;
       const visibleTraces = React.useMemo(()=>{
         const mine=new Set(cats.map(c=>c.id));
         return traces.filter(t=>!hiddenAreas.has(mine.has(t.category_id)?t.category_id:'none'));
@@ -1754,12 +1758,12 @@
 
             <div style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
               {view==='month'&&<MonthView currentDate={date} events={visible} calendars={calendars} categories={cats} onDayClick={d=>setModal({defaultDate:d})} onEventClick={e=>setModal({event:e})}/>}
-              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
-              {view==='day'&&<TimeGrid days={[date]} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='week'&&<TimeGrid days={getWeekDays(date)} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} newCalendarId={newCalId} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
+              {view==='day'&&<TimeGrid days={[date]} events={visible} traces={visibleTraces} onOpenLog={nav.openLog} calendars={calendars} newCalendarId={newCalId} categories={cats} onSlotClick={(d,end)=>setModal({defaultDate:d,defaultEnd:end})} onEventClick={e=>setModal({event:e})} onEventDrop={eventMoved}/>}
             </div>
           </div>
 
-          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} defaultEnd={modal.defaultEnd} calendars={calendars} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} defaultEnd={modal.defaultEnd} calendars={calendars} newCalendarId={newCalId} shownCals={selCals} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved}/>}
           {calModal&&<CalendarModal calendar={calModal==='new'?null:calModal} calendars={calendars} onClose={()=>setCalModal(null)}
             onSaved={calSaved} onDeleted={calDeleted}/>}
           {areaModal&&<AreaModal area={areaModal.id?areaModal:null} defaultGroupId={areaModal.groupId} groups={groups} onClose={()=>setAreaModal(null)}
