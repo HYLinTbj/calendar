@@ -250,6 +250,9 @@
     function saveHiddenAreas(userId, s) {
       try { localStorage.setItem(hiddenAreasKey(userId), JSON.stringify([...s])); } catch {}
     }
+    // The key an Area id is shown and hidden under in the sidebar: its own id if it's one
+    // of ours, else 'none' (no Area, or someone else's Area in a shared calendar).
+    const areaKey = (categories, id) => categories.some(c=>c.id===id) ? id : 'none';
 
     // ─────────────────────────────────────────────
     // AUTH PAGE
@@ -1225,11 +1228,12 @@
         && (!form.repeat_end_date || form.repeat_end_date < form.start_date);
       const formInvalid = rangeInvalid || weeklyDaysInvalid || weeklyStartInvalid || repeatEndInvalid;
       // The calendar view drops events whose calendar or Area is hidden in the sidebar
-      // (`visible` in CalendarApp), so say so before saving one there. Only for our own
-      // calendars: one shared with us (opened from search) has no checkbox to tick. An
-      // Area that isn't ours counts as "No area", as there.
-      const calendarHidden = calendars.some(c=>c.id===form.calendar_id) && !shownCals.has(form.calendar_id);
-      const areaHidden = hiddenAreas.has(categories.some(c=>c.id===form.category_id) ? form.category_id : 'none');
+      // (`visible` in CalendarApp), so say so before saving one there. Only in our own
+      // calendars: the view never loads one shared with us (an event opened from search),
+      // so no checkbox would bring it back.
+      const ownCalendar = calendars.some(c=>c.id===form.calendar_id);
+      const calendarHidden = ownCalendar && !shownCals.has(form.calendar_id);
+      const areaHidden = ownCalendar && hiddenAreas.has(areaKey(categories,form.category_id));
       const hiddenNote = <div style={{fontSize:11,color:'var(--text-muted)',marginTop:4}}>Hidden in the sidebar, so this event won't show until you tick it.</div>;
 
       function pickFreq(freq){
@@ -1721,19 +1725,17 @@
 
       // An event tagged with someone else's Area (in a shared calendar) has none of
       // ours: it's coloured by its calendar, so it's shown and hidden with "No area".
-      const visible = React.useMemo(()=>{
-        const mine=new Set(cats.map(c=>c.id));
-        return events.filter(e=>selCals.has(e.calendar_id) && !hiddenAreas.has(mine.has(e.category_id)?e.category_id:'none'));
-      },[events,selCals,hiddenAreas,cats]);
+      const visible = React.useMemo(()=>
+        events.filter(e=>selCals.has(e.calendar_id) && !hiddenAreas.has(areaKey(cats,e.category_id))),
+      [events,selCals,hiddenAreas,cats]);
       const eventDays = React.useMemo(()=>new Set(visible.flatMap(dayKeys)),[visible]);
       // A new event (editor, sweep or timer) goes to the default calendar, or while that's
       // hidden to the oldest one ticked, so that it shows once saved. None ticked: the default.
       const shown=c=>selCals.has(c.id);
-      const newCalId=(calendars.find(c=>c.is_default&&shown(c))||calendars.find(shown)||calendars.find(c=>c.is_default))?.id;
-      const visibleTraces = React.useMemo(()=>{
-        const mine=new Set(cats.map(c=>c.id));
-        return traces.filter(t=>!hiddenAreas.has(mine.has(t.category_id)?t.category_id:'none'));
-      },[traces,hiddenAreas,cats]);
+      const newCalId=(calendars.find(c=>c.is_default&&shown(c))||calendars.find(shown)||calendars.find(c=>c.is_default)||calendars[0])?.id;
+      const visibleTraces = React.useMemo(()=>
+        traces.filter(t=>!hiddenAreas.has(areaKey(cats,t.category_id))),
+      [traces,hiddenAreas,cats]);
 
       return (
         <div style={{display:'flex',flexDirection:'column',height:'100vh',overflow:'hidden'}}>
@@ -1918,15 +1920,18 @@
           ? ['/traces',{ category_id:t.category_id||null, day:ymd(new Date(t.start_time)), minutes:mins, note:t.title||'' },'area not found']
           : ['/events',{ title:t.title||areaName||'Session', calendar_id:calendarId, start_time:t.start_time, end_time:endTime.toISOString(), category_id:t.category_id||null },'category not found'];
         try {
-          let saved;
-          try {
-            saved = await api(path,{method:'POST',body:JSON.stringify(body)});
-          } catch(ex) {
-            // The area was deleted while the timer ran: log the session uncategorized
-            // (what deleting an area does to its existing time) rather than leave it
-            // unloggable, with Discard as the only way out.
-            if(!body.category_id || ex.message!==notFound) throw ex;
-            saved = await api(path,{method:'POST',body:JSON.stringify({...body,category_id:null})});
+          // The area or calendar was deleted (here or in another tab) while the timer ran:
+          // log the session uncategorized (what deleting an area does to its existing
+          // time), or to the default calendar, rather than leave it unloggable, with
+          // Discard as the only way out. Each retry drops one field, so there are at most two.
+          let saved, send=body;
+          for(;;){
+            try { saved = await api(path,{method:'POST',body:JSON.stringify(send)}); break; }
+            catch(ex) {
+              if(send.calendar_id && ex.message==='calendar not found') send={...send,calendar_id:undefined};
+              else if(send.category_id && ex.message===notFound) send={...send,category_id:null};
+              else throw ex;
+            }
           }
           // api() resolves undefined on a 401 while it reloads to the login page — that's
           // not a save, so keep the stored timer to Stop again after signing back in.
