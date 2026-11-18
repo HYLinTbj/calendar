@@ -115,32 +115,49 @@ func TestEventHandler_Create_ViewOnlyShare_Denied(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, wEv.Code)
 }
 
-// Calendar.html matches this exact text: the timer then logs to the default calendar,
-// and the timer and editor reload the calendar list.
-func TestEventHandler_Create_DeletedCalendar_ErrorText(t *testing.T) {
+// Calendar.html's timer matches this exact text to log to the default calendar instead.
+// Every route that takes a calendar_id gives it, so check them all.
+func TestEventHandler_DeletedCalendar_ErrorText(t *testing.T) {
 	truncateAll(t, testPool)
 	_, token := MustRegisterAndLogin(t, testRouter, "evh_gone")
 
-	wCal := Do(t, testRouter, "POST", "/calendars", token, map[string]string{"name": "Work"})
-	require.Equal(t, http.StatusCreated, wCal.Code)
-	var cal struct {
+	gone := createCalendar(t, token, "Work")
+	require.Equal(t, http.StatusNoContent, Do(t, testRouter, "DELETE", fmt.Sprintf("/calendars/%s", gone), token, nil).Code)
+
+	wEv := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"title":      "Kept",
+		"start_time": "2024-06-15T09:00:00Z",
+		"end_time":   "2024-06-15T10:00:00Z",
+	})
+	require.Equal(t, http.StatusCreated, wEv.Code)
+	var ev struct {
 		ID uuid.UUID `json:"id"`
 	}
-	require.NoError(t, json.NewDecoder(wCal.Body).Decode(&cal))
-	require.Equal(t, http.StatusNoContent, Do(t, testRouter, "DELETE", fmt.Sprintf("/calendars/%s", cal.ID), token, nil).Code)
+	require.NoError(t, json.NewDecoder(wEv.Body).Decode(&ev))
 
-	w := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
-		"calendar_id": cal.ID,
-		"title":       "Session",
-		"start_time":  "2024-06-15T09:00:00Z",
-		"end_time":    "2024-06-15T10:00:00Z",
-	})
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-	var resp struct {
-		Error string `json:"error"`
+	for _, tc := range []struct {
+		method, path string
+		body         map[string]interface{}
+	}{
+		{"POST", "/events", map[string]interface{}{
+			"calendar_id": gone, "title": "Session",
+			"start_time": "2024-06-15T09:00:00Z", "end_time": "2024-06-15T10:00:00Z",
+		}},
+		{"PUT", fmt.Sprintf("/events/%s", ev.ID), map[string]interface{}{"calendar_id": gone}},
+		{"POST", "/recurring-events", map[string]interface{}{
+			"calendar_id": gone, "title": "Weekly",
+			"start_time": "2024-01-01T09:00:00Z", "end_time": "2024-01-01T10:00:00Z",
+			"frequency": "weekly", "interval": 1,
+		}},
+	} {
+		w := Do(t, testRouter, tc.method, tc.path, token, tc.body)
+		assert.Equal(t, http.StatusBadRequest, w.Code, "%s %s: %s", tc.method, tc.path, w.Body.String())
+		var resp struct {
+			Error string `json:"error"`
+		}
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+		assert.Equal(t, "calendar not found", resp.Error, "%s %s", tc.method, tc.path)
 	}
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Equal(t, "calendar not found", resp.Error)
 }
 
 func TestEventHandler_Create_WithReminders_ScheduledInRedis(t *testing.T) {

@@ -1138,7 +1138,7 @@
     // ─────────────────────────────────────────────
     // EVENT MODAL (create / edit)
     // ─────────────────────────────────────────────
-    function EventModal({ event, defaultDate, defaultEnd, calendars, newCalendarId, shownCals, hiddenAreas, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated, onCalendarGone }) {
+    function EventModal({ event, defaultDate, defaultEnd, calendars, newCalendarId, shownCals, hiddenAreas, categories, groups=[], onSave, onDelete, onRefetch, onClose, onCategoryCreated, ourAreas }) {
       const isEdit = !!event?.id;
       const isRecurring = isEdit && !!event.recurring_event_id;
       // Edited on its own: no longer linked, but still part of its series, so it can delete
@@ -1179,8 +1179,8 @@
         // scope choice — editing an existing series instance only
         edit_scope:       'this',    // 'this' | 'this_and_following' | 'all'
       }));
-      // The calendar list can arrive after the editor opens, or lose the one picked (deleted
-      // in another tab): keep a new event on one of ours, the one it would go to.
+      // The calendar list can arrive after the editor opens: until a new event's calendar
+      // is one in it, keep it on the one it would go to.
       React.useEffect(()=>{
         if(!isEdit && newCalendarId && !calendars.some(c=>c.id===form.calendar_id))
           setForm(f=>({...f,calendar_id:newCalendarId}));
@@ -1242,7 +1242,7 @@
       // so no checkbox would bring it back.
       const ownCalendar = calendars.some(c=>c.id===form.calendar_id);
       const calendarHidden = ownCalendar && !shownCals.has(form.calendar_id);
-      const areaHidden = ownCalendar && hiddenAreas.has(areaKey(new Set(categories.map(c=>c.id)),form.category_id));
+      const areaHidden = ownCalendar && hiddenAreas.has(areaKey(ourAreas,form.category_id));
 
       function pickFreq(freq){
         setForm(f=>{
@@ -1298,7 +1298,7 @@
           } else if (!isEdit && form.repeat_freq !== 'none') {
             // New recurring series.
             const body = {
-              calendar_id: form.calendar_id, title: form.title.trim(), description: form.description,
+              calendar_id: form.calendar_id||undefined, title: form.title.trim(), description: form.description,
               location: form.location, start_time: startISO, end_time: endISO, all_day: form.all_day,
               visibility: form.private ? 'private' : 'public',
               category_id: form.category_id || null,
@@ -1325,7 +1325,7 @@
             onRefetch(); onClose();
 
           } else {
-            const body = {title:form.title.trim(),description:form.description,location:form.location,calendar_id:form.calendar_id,start_time:startISO,end_time:endISO,all_day:form.all_day,visibility:form.private?'private':'public'};
+            const body = {title:form.title.trim(),description:form.description,location:form.location,calendar_id:form.calendar_id||undefined,start_time:startISO,end_time:endISO,all_day:form.all_day,visibility:form.private?'private':'public'};
             // Explicit null clears the category on edit ("None" selected);
             // omitting the field would keep the current one.
             body.category_id = form.category_id || null;
@@ -1334,11 +1334,7 @@
               : await api('/events',              {method:'POST',body:JSON.stringify(body)});
             onSave(saved);
           }
-        } catch(ex){
-          // Deleted in another tab, say: reload the calendars, which moves a new event to one that's left.
-          if(ex.message==='calendar not found' && onCalendarGone) onCalendarGone();
-          setErr(ex.message);
-        }
+        } catch(ex){setErr(ex.message);}
         finally{setBusy(false);}
       }
 
@@ -1726,15 +1722,6 @@
         setSel(s=>{ const n=new Set(s); if(n.delete(id) && def) n.add(def.id); return n; });
         setCalModal(null);
       }
-      // A save found a calendar gone (deleted in another tab): reload them, and as calDeleted
-      // does, show the default if a shown one went, since its events are the default's now.
-      function calendarsGone(){
-        api('/calendars').then(d=>{
-          const cs=d||[], ids=new Set(cs.map(c=>c.id)), def=cs.find(c=>c.is_default);
-          setCals(cs);
-          setSel(s=>{ const n=new Set([...s].filter(id=>ids.has(id))); if(n.size<s.size && def) n.add(def.id); return n; });
-        }).catch(()=>{});
-      }
       function catSaved(cat){ setCats(cs=>{ const i=cs.findIndex(c=>c.id===cat.id); return i>=0?[...cs.slice(0,i),cat,...cs.slice(i+1)]:[...cs,cat]; }); }
       function catDeleted(id){ setCats(cs=>cs.filter(c=>c.id!==id)); setAreaModal(null); }
       function groupSaved(g){ setGroups(gs=>{ const i=gs.findIndex(x=>x.id===g.id); return i>=0?[...gs.slice(0,i),g,...gs.slice(i+1)]:[...gs,g]; }); setGroupModal(null); }
@@ -1767,7 +1754,7 @@
               onToday={()=>setDate(new Date())} user={user} onLogout={onLogout}
               search={search} onSearch={v=>{ setSearch(v); setShowSearch(!!v); }}
               workspace={nav.workspace} onWorkspace={nav.setWorkspace}
-              onLogged={loadEvents} timer={{calendar:newCal, hiddenAreas, onCalendarGone:calendarsGone}}/>
+              onLogged={loadEvents} timer={{calendar:newCal, hiddenAreas, ourAreas}}/>
             {showSearch&&(
               <div style={{position:'absolute',right:164,top:'100%',zIndex:400}}>
                 <SearchDropdown query={search} calendars={calendars} categories={cats}
@@ -1797,7 +1784,7 @@
             </div>
           </div>
 
-          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} defaultEnd={modal.defaultEnd} calendars={calendars} newCalendarId={newCalId} shownCals={selCals} hiddenAreas={hiddenAreas} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved} onCalendarGone={calendarsGone}/>}
+          {modal&&<EventModal event={modal.event} defaultDate={modal.defaultDate} defaultEnd={modal.defaultEnd} calendars={calendars} newCalendarId={newCalId} shownCals={selCals} hiddenAreas={hiddenAreas} categories={cats} groups={groups} onSave={eventSaved} onDelete={eventDeleted} onRefetch={loadEvents} onClose={()=>setModal(null)} onCategoryCreated={catSaved} ourAreas={ourAreas}/>}
           {calModal&&<CalendarModal calendar={calModal==='new'?null:calModal} calendars={calendars} onClose={()=>setCalModal(null)}
             onSaved={calSaved} onDeleted={calDeleted}/>}
           {areaModal&&<AreaModal area={areaModal.id?areaModal:null} defaultGroupId={areaModal.groupId} groups={groups} onClose={()=>setAreaModal(null)}
@@ -1864,12 +1851,13 @@
     const clearTimer = userId => localStorage.removeItem(timerKey(userId));
 
     // Only the calendar view, where the sidebar hides calendars and Areas, passes the last three.
-    // calendar: where a session stopped here goes (newCal, so it shows once logged), named on
-    // the chip while it isn't the default; without one the server uses the default calendar.
-    // hiddenAreas: the picker warns when the Area picked is hidden. onCalendarGone: reloads the
-    // calendars when that one turns out deleted.
-    function TimerChip({ user, onLogged, calendar, hiddenAreas, onCalendarGone }) {
+    // calendar: where a session stopped here goes (newCal, so it shows once logged). Only while
+    // that isn't the default is it sent, and named on the chip; otherwise the server uses its
+    // own default, which another tab may have changed. hiddenAreas and ourAreas (the Area ids
+    // the grid's filter knows): the picker warns when the Area picked is hidden.
+    function TimerChip({ user, onLogged, calendar, hiddenAreas, ourAreas }) {
       const uid = user?.id;
+      const otherCal = calendar && !calendar.is_default ? calendar : null;
       const [categories,setCategories] = React.useState([]);
       const [groups,setGroups]         = React.useState([]);
       const [running,setRunning]       = React.useState(()=>getTimer(uid));
@@ -1944,17 +1932,17 @@
         const asTrace=mins<TRACE_CUTOFF_MIN;
         const [path,body,notFound]=asTrace
           ? ['/traces',{ category_id:t.category_id||null, day:ymd(new Date(t.start_time)), minutes:mins, note:t.title||'' },'area not found']
-          : ['/events',{ title:t.title||areaName||'Session', calendar_id:calendar?.id, start_time:t.start_time, end_time:endTime.toISOString(), category_id:t.category_id||null },'category not found'];
+          : ['/events',{ title:t.title||areaName||'Session', calendar_id:otherCal?.id, start_time:t.start_time, end_time:endTime.toISOString(), category_id:t.category_id||null },'category not found'];
         try {
           // The area or calendar was deleted (here or in another tab) while the timer ran:
           // log the session uncategorized (what deleting an area does to its existing
           // time), or to the default calendar, rather than leave it unloggable, with
           // Discard as the only way out. Each retry drops one field, so there are at most two.
-          let saved, send=body, gone=false;
+          let saved, send=body;
           for(;;){
             try { saved = await api(path,{method:'POST',body:JSON.stringify(send)}); break; }
             catch(ex) {
-              if(send.calendar_id && ex.message==='calendar not found'){ send={...send,calendar_id:undefined}; gone=true; }
+              if(send.calendar_id && ex.message==='calendar not found') send={...send,calendar_id:undefined};
               else if(send.category_id && ex.message===notFound) send={...send,category_id:null};
               else throw ex;
             }
@@ -1963,10 +1951,7 @@
           // not a save, so keep the stored timer to Stop again after signing back in.
           if(!saved){ restore(); return; }
           setRunning(getTimer(uid)); // null, or a timer started elsewhere meanwhile
-          // Reloading the calendars shows the default if needed and refetches the events,
-          // so don't also refetch with the old list (whichever lands last would win).
-          if(gone && onCalendarGone) onCalendarGone();
-          else onLogged&&onLogged();
+          onLogged&&onLogged();
         } catch(ex) {
           restore();
           alert('Could not log session: '+ex.message);
@@ -1976,8 +1961,8 @@
       const runArea    = running && categories.find(c=>c.id===running.category_id);
       const elapsedSec = running ? Math.max(0, Math.round((now - new Date(running.start_time))/1000)) : 0;
       // Named only once Stop would log an event: a shorter session is a trace, in no calendar.
-      const toCalendar = calendar && !calendar.is_default && Math.round(elapsedSec/60)>=TRACE_CUTOFF_MIN ? calendar : null;
-      const areaHidden = hiddenAreas && hiddenAreas.has(areaKey(new Set(categories.map(c=>c.id)),form.category_id));
+      const toCalendar = otherCal && Math.round(elapsedSec/60)>=TRACE_CUTOFF_MIN ? otherCal : null;
+      const areaHidden = picking && hiddenAreas && hiddenAreas.has(areaKey(ourAreas,form.category_id));
 
       return (
         <div style={{position:'relative'}}>

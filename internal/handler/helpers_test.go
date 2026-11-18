@@ -116,6 +116,18 @@ func createCategory(t *testing.T, token, name string, weeklyTarget int) uuid.UUI
 	return resp.ID
 }
 
+// createCalendar creates a calendar via the API and returns its ID.
+func createCalendar(t *testing.T, token, name string) uuid.UUID {
+	t.Helper()
+	w := Do(t, testRouter, "POST", "/calendars", token, map[string]any{"name": name})
+	require.Equal(t, http.StatusCreated, w.Code, "create calendar failed: %s", w.Body.String())
+	var resp struct {
+		ID uuid.UUID `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	return resp.ID
+}
+
 // createCategoryGroup creates a category group via the API and returns its ID.
 func createCategoryGroup(t *testing.T, token, name, color string) uuid.UUID {
 	t.Helper()
