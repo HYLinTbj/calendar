@@ -115,6 +115,34 @@ func TestEventHandler_Create_ViewOnlyShare_Denied(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, wEv.Code)
 }
 
+// Calendar.html matches this exact text: the timer then logs to the default calendar,
+// and the timer and editor reload the calendar list.
+func TestEventHandler_Create_DeletedCalendar_ErrorText(t *testing.T) {
+	truncateAll(t, testPool)
+	_, token := MustRegisterAndLogin(t, testRouter, "evh_gone")
+
+	wCal := Do(t, testRouter, "POST", "/calendars", token, map[string]string{"name": "Work"})
+	require.Equal(t, http.StatusCreated, wCal.Code)
+	var cal struct {
+		ID uuid.UUID `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(wCal.Body).Decode(&cal))
+	require.Equal(t, http.StatusNoContent, Do(t, testRouter, "DELETE", fmt.Sprintf("/calendars/%s", cal.ID), token, nil).Code)
+
+	w := Do(t, testRouter, "POST", "/events", token, map[string]interface{}{
+		"calendar_id": cal.ID,
+		"title":       "Session",
+		"start_time":  "2024-06-15T09:00:00Z",
+		"end_time":    "2024-06-15T10:00:00Z",
+	})
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "calendar not found", resp.Error)
+}
+
 func TestEventHandler_Create_WithReminders_ScheduledInRedis(t *testing.T) {
 	truncateAll(t, testPool)
 	_, token := MustRegisterAndLogin(t, testRouter, "evh_e")
